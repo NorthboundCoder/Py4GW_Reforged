@@ -3115,128 +3115,123 @@ def DrawWindow():
                             StartBot()
                     PyImGui.end_tab_item()
 
-            if PyImGui.begin_tab_item("TRAVEL"):        
-                    state.radio_button_selected = PyImGui.radio_button("\uf51d GO TO ASHFORD ABBEY", state.radio_button_selected, 2)
-                    state.radio_button_selected = PyImGui.radio_button("\uf6e8 GO TO FOIBLE'S FAIR", state.radio_button_selected, 3)
-                    state.radio_button_selected = PyImGui.radio_button("\uf447 GO TO FORT RANIK", state.radio_button_selected, 4)
-                    state.radio_button_selected = PyImGui.radio_button(" \uf43a GO TO THE BARRADIN ESTATE", state.radio_button_selected, 5)
-                    state.radio_button_selected = PyImGui.radio_button("\uf5a0 THE GRAND TOUR", state.radio_button_selected, 19)
-
-                    if IsBotStarted():        
-                        if PyImGui.button(" \uf04d   STOP"):
-                            ResetEnvironment()
-                            StopBot()
-                    else:
-                        if PyImGui.button(" \uf04b   START"):
-                            ResetEnvironment()
-                            StartBot()
-                    PyImGui.end_tab_item()
-
-            if PyImGui.begin_tab_item("NIC ITEMS"): 
-                    PyImGui.spacing()
-                    state.radio_button_selected = PyImGui.radio_button("\ue599 BAKED HUSKS", state.radio_button_selected, 6)
-                    state.radio_button_selected = PyImGui.radio_button("\uf188 DULL CARAPACES", state.radio_button_selected, 8)
-                    state.radio_button_selected = PyImGui.radio_button("\uf54c GARGOYLE SKULLS", state.radio_button_selected, 9)
-                    state.radio_button_selected = PyImGui.radio_button("\uf4d6 GRAWL NECKLACES", state.radio_button_selected, 10)
-                    state.radio_button_selected = PyImGui.radio_button("\uf7ad ICY LODESTONES", state.radio_button_selected, 11)
-                    state.radio_button_selected = PyImGui.radio_button("\uf3a5 ENCHANTED LODESTONES", state.radio_button_selected, 12)
-                    state.radio_button_selected = PyImGui.radio_button("\uf5bb RED IRIS FLOWERS", state.radio_button_selected, 13)
-                    state.radio_button_selected = PyImGui.radio_button("\uf5d7 SKELETAL LIMBS", state.radio_button_selected, 14)
-                    state.radio_button_selected = PyImGui.radio_button("\ue4f2 SKALE FINS", state.radio_button_selected, 15)
-                    state.radio_button_selected = PyImGui.radio_button("\uf717 SPIDER LEGS", state.radio_button_selected, 16)
-                    state.radio_button_selected = PyImGui.radio_button("\uf4d8 UNNATURAL SEEDS", state.radio_button_selected, 17)
-                    state.radio_button_selected = PyImGui.radio_button("\ue19b WORN BELTS", state.radio_button_selected, 18)
-                    state.radio_button_selected = PyImGui.radio_button("\uf06b NICHOLAS SANDFORD", state.radio_button_selected, 26)
-                    PyImGui.spacing()
-
-                    if IsBotStarted():        
-                        if PyImGui.button(" \uf04d   STOP"):
-                            ResetEnvironment()
-                            StopBot()
-                    else:
-                        if PyImGui.button(" \uf04b   START"):
-                            ResetEnvironment()
-                            StartBot()
-                    PyImGui.end_tab_item()
-
-            if PyImGui.begin_tab_item("INVENTORY"):            
-                    show_info_table_item()
-                    PyImGui.spacing()
-                    PyImGui.end_tab_item()
-            if PyImGui.begin_tab_item("MISC"):   
-                        
-                    state.radio_button_selected = PyImGui.radio_button("\uf6be TAME PET", state.radio_button_selected, 27)
-                    state.radio_button_selected = PyImGui.radio_button("\uf70c CHARR GATE OPENER", state.radio_button_selected, 42)
-
-                    if IsBotStarted():        
-                        if PyImGui.button(" \uf04d   STOP"):
-                            ResetEnvironment()
-                            StopBot()
-                    else:
-                        if PyImGui.button(" \uf04b   START"):
-                            ResetEnvironment()
-                            StartBot()
-
-                    PyImGui.end_tab_item()
-
-            if PyImGui.begin_tab_item("SKILLS"):  
-                        PyImGui.spacing()                    
-                        PyImGui.text_colored("\uf132 UNLOCK WARRIOR SKILL", (1.0, 1.0, 0.2, 1.0))
-                        PyImGui.pop_style_color(1)
-                        PyImGui.same_line(300, -1.0)
-                        PyImGui.text_colored("\uf54c UNLOCK NECROMANCER SKILL", (0.0, 0.8, 0.3, 1.0))
-                        PyImGui.pop_style_color(1)
-
-                        state.radio_button_selected = PyImGui.radio_button(" \uf00c PRIMARY/SECONDARY REQUIRED##WARRIOR_REQ", state.radio_button_selected, 28)
-                        PyImGui.same_line(300, -1.0)
-                        state.radio_button_selected = PyImGui.radio_button(" \uf00c PRIMARY/SECONDARY REQUIRED##NECRO_REQ", state.radio_button_selected, 34)
-                        state.radio_button_selected = PyImGui.radio_button(" \uf00d PRIMARY/SECONDARY NO REQ##WARRRIOR_NOREQ", state.radio_button_selected, 29)               
-                        PyImGui.same_line(300, -1.0)
-                        state.radio_button_selected = PyImGui.radio_button(" \uf00d PRIMARY/SECONDARY NO REQ##NECRO_NOREQ", state.radio_button_selected, 35)
-
-                        PyImGui.text_colored("\uf1bb UNLOCK RANGER SKILL", (1.0, 0.5, 0.0, 1.0))
-                        PyImGui.pop_style_color(1)
-                        PyImGui.same_line(300, -1.0)
-                        PyImGui.text_colored("\ue2ca UNLOCK MESMER SKILL", (1.0, 0.1, 0.8, 1.0))
-                        PyImGui.pop_style_color(1)
-
-                        state.radio_button_selected = PyImGui.radio_button(" \uf00c PRIMARY/SECONDARY REQUIRED##RANGER_REQ", state.radio_button_selected, 30)
-                        PyImGui.same_line(300, -1.0)
-                        state.radio_button_selected = PyImGui.radio_button(" \uf00c PRIMARY/SECONDARY REQUIRED##MESMER_REQ", state.radio_button_selected, 36)
-                        state.radio_button_selected = PyImGui.radio_button(" \uf00d PRIMARY/SECONDARY NO REQ##RANGER_NOREQ", state.radio_button_selected, 31)               
-                        PyImGui.same_line(300, -1.0)
-                        state.radio_button_selected = PyImGui.radio_button(" \uf00d PRIMARY/SECONDARY NO REQ##MESMER_NOREQ", state.radio_button_selected, 37)
-
-                        PyImGui.text_colored("\uf644 UNLOCK MONK SKILL", (0.2, 1.0, 1.0, 1.0))
-                        PyImGui.pop_style_color(1)
-                        PyImGui.same_line(300, -1.0)
-                        PyImGui.text_colored("\uf6e8 UNLOCK ELEMENTALIST SKILL", (1.0, 0.0, 0.2, 1.0))  
-                        PyImGui.pop_style_color(1)
-
-                        state.radio_button_selected = PyImGui.radio_button(" \uf00c PRIMARY/SECONDARY REQUIRED##MONK_REQ", state.radio_button_selected, 32)
-                        PyImGui.same_line(300, -1.0)
-                        state.radio_button_selected = PyImGui.radio_button(" \uf00c PRIMARY/SECONDARY REQUIRED##ELEMENTALIST_REQ", state.radio_button_selected, 38)
-                        state.radio_button_selected = PyImGui.radio_button(" \uf00d PRIMARY/SECONDARY NO REQ##MONK_NOREQ", state.radio_button_selected, 33)               
-                        PyImGui.same_line(300, -1.0)
-                        state.radio_button_selected = PyImGui.radio_button(" \uf00d PRIMARY/SECONDARY NO REQ##ELEMENTALIST_NOREQ", state.radio_button_selected, 39)
-                        PyImGui.spacing()
-
+                if PyImGui.begin_tab_item("TRAVEL"):        
+                        state.radio_button_selected = PyImGui.radio_button("\uf51d GO TO ASHFORD ABBEY", state.radio_button_selected, 2)
+                        state.radio_button_selected = PyImGui.radio_button("\uf6e8 GO TO FOIBLE'S FAIR", state.radio_button_selected, 3)
+                        state.radio_button_selected = PyImGui.radio_button("\uf447 GO TO FORT RANIK", state.radio_button_selected, 4)
+                        state.radio_button_selected = PyImGui.radio_button(" \uf43a GO TO THE BARRADIN ESTATE", state.radio_button_selected, 5)
+                        state.radio_button_selected = PyImGui.radio_button("\uf5a0 THE GRAND TOUR", state.radio_button_selected, 19)
 
                         if IsBotStarted():        
                             if PyImGui.button(" \uf04d   STOP"):
-                                    ResetEnvironment()
-                                    StopBot()
+                                ResetEnvironment()
+                                StopBot()
                         else:
                             if PyImGui.button(" \uf04b   START"):
-                                    ResetEnvironment()
-                                    StartBot()
+                                ResetEnvironment()
+                                StartBot()
+                        PyImGui.end_tab_item()
 
-                        PyImGui.end_tab_item()        
+                if PyImGui.begin_tab_item("NIC ITEMS"): 
+                        PyImGui.spacing()
+                        state.radio_button_selected = PyImGui.radio_button("\ue599 BAKED HUSKS", state.radio_button_selected, 6)
+                        state.radio_button_selected = PyImGui.radio_button("\uf188 DULL CARAPACES", state.radio_button_selected, 8)
+                        state.radio_button_selected = PyImGui.radio_button("\uf54c GARGOYLE SKULLS", state.radio_button_selected, 9)
+                        state.radio_button_selected = PyImGui.radio_button("\uf4d6 GRAWL NECKLACES", state.radio_button_selected, 10)
+                        state.radio_button_selected = PyImGui.radio_button("\uf7ad ICY LODESTONES", state.radio_button_selected, 11)
+                        state.radio_button_selected = PyImGui.radio_button("\uf3a5 ENCHANTED LODESTONES", state.radio_button_selected, 12)
+                        state.radio_button_selected = PyImGui.radio_button("\uf5bb RED IRIS FLOWERS", state.radio_button_selected, 13)
+                        state.radio_button_selected = PyImGui.radio_button("\uf5d7 SKELETAL LIMBS", state.radio_button_selected, 14)
+                        state.radio_button_selected = PyImGui.radio_button("\ue4f2 SKALE FINS", state.radio_button_selected, 15)
+                        state.radio_button_selected = PyImGui.radio_button("\uf717 SPIDER LEGS", state.radio_button_selected, 16)
+                        state.radio_button_selected = PyImGui.radio_button("\uf4d8 UNNATURAL SEEDS", state.radio_button_selected, 17)
+                        state.radio_button_selected = PyImGui.radio_button("\ue19b WORN BELTS", state.radio_button_selected, 18)
+                        state.radio_button_selected = PyImGui.radio_button("\uf06b NICHOLAS SANDFORD", state.radio_button_selected, 26)
+                        PyImGui.spacing()
 
-            if PyImGui.begin_tab_item("STATS"):            
-                    show_info_table_run()
-                    PyImGui.spacing()
-                    PyImGui.end_tab_item()
+                        if IsBotStarted():        
+                            if PyImGui.button(" \uf04d   STOP"):
+                                ResetEnvironment()
+                                StopBot()
+                        else:
+                            if PyImGui.button(" \uf04b   START"):
+                                ResetEnvironment()
+                                StartBot()
+                        PyImGui.end_tab_item()
+
+                if PyImGui.begin_tab_item("INVENTORY"):            
+                        show_info_table_item()
+                        PyImGui.spacing()
+                        PyImGui.end_tab_item()
+                if PyImGui.begin_tab_item("MISC"):   
+                        
+                        state.radio_button_selected = PyImGui.radio_button("\uf6be TAME PET", state.radio_button_selected, 27)
+                        state.radio_button_selected = PyImGui.radio_button("\uf70c CHARR GATE OPENER", state.radio_button_selected, 42)
+
+                        if IsBotStarted():        
+                            if PyImGui.button(" \uf04d   STOP"):
+                                ResetEnvironment()
+                                StopBot()
+                        else:
+                            if PyImGui.button(" \uf04b   START"):
+                                ResetEnvironment()
+                                StartBot()
+
+                        PyImGui.end_tab_item()
+
+                if PyImGui.begin_tab_item("SKILLS"):  
+                            PyImGui.spacing()                    
+                            PyImGui.text_colored("\uf132 UNLOCK WARRIOR SKILL", (1.0, 1.0, 0.2, 1.0))
+                            PyImGui.same_line(300, -1.0)
+                            PyImGui.text_colored("\uf54c UNLOCK NECROMANCER SKILL", (0.0, 0.8, 0.3, 1.0))
+
+                            state.radio_button_selected = PyImGui.radio_button(" \uf00c PRIMARY/SECONDARY REQUIRED##WARRIOR_REQ", state.radio_button_selected, 28)
+                            PyImGui.same_line(300, -1.0)
+                            state.radio_button_selected = PyImGui.radio_button(" \uf00c PRIMARY/SECONDARY REQUIRED##NECRO_REQ", state.radio_button_selected, 34)
+                            state.radio_button_selected = PyImGui.radio_button(" \uf00d PRIMARY/SECONDARY NO REQ##WARRRIOR_NOREQ", state.radio_button_selected, 29)               
+                            PyImGui.same_line(300, -1.0)
+                            state.radio_button_selected = PyImGui.radio_button(" \uf00d PRIMARY/SECONDARY NO REQ##NECRO_NOREQ", state.radio_button_selected, 35)
+
+                            PyImGui.text_colored("\uf1bb UNLOCK RANGER SKILL", (1.0, 0.5, 0.0, 1.0))
+                            PyImGui.same_line(300, -1.0)
+                            PyImGui.text_colored("\ue2ca UNLOCK MESMER SKILL", (1.0, 0.1, 0.8, 1.0))
+
+                            state.radio_button_selected = PyImGui.radio_button(" \uf00c PRIMARY/SECONDARY REQUIRED##RANGER_REQ", state.radio_button_selected, 30)
+                            PyImGui.same_line(300, -1.0)
+                            state.radio_button_selected = PyImGui.radio_button(" \uf00c PRIMARY/SECONDARY REQUIRED##MESMER_REQ", state.radio_button_selected, 36)
+                            state.radio_button_selected = PyImGui.radio_button(" \uf00d PRIMARY/SECONDARY NO REQ##RANGER_NOREQ", state.radio_button_selected, 31)               
+                            PyImGui.same_line(300, -1.0)
+                            state.radio_button_selected = PyImGui.radio_button(" \uf00d PRIMARY/SECONDARY NO REQ##MESMER_NOREQ", state.radio_button_selected, 37)
+
+                            PyImGui.text_colored("\uf644 UNLOCK MONK SKILL", (0.2, 1.0, 1.0, 1.0))
+                            PyImGui.same_line(300, -1.0)
+                            PyImGui.text_colored("\uf6e8 UNLOCK ELEMENTALIST SKILL", (1.0, 0.0, 0.2, 1.0))  
+
+                            state.radio_button_selected = PyImGui.radio_button(" \uf00c PRIMARY/SECONDARY REQUIRED##MONK_REQ", state.radio_button_selected, 32)
+                            PyImGui.same_line(300, -1.0)
+                            state.radio_button_selected = PyImGui.radio_button(" \uf00c PRIMARY/SECONDARY REQUIRED##ELEMENTALIST_REQ", state.radio_button_selected, 38)
+                            state.radio_button_selected = PyImGui.radio_button(" \uf00d PRIMARY/SECONDARY NO REQ##MONK_NOREQ", state.radio_button_selected, 33)               
+                            PyImGui.same_line(300, -1.0)
+                            state.radio_button_selected = PyImGui.radio_button(" \uf00d PRIMARY/SECONDARY NO REQ##ELEMENTALIST_NOREQ", state.radio_button_selected, 39)
+                            PyImGui.spacing()
+
+
+                            if IsBotStarted():        
+                                if PyImGui.button(" \uf04d   STOP"):
+                                        ResetEnvironment()
+                                        StopBot()
+                            else:
+                                if PyImGui.button(" \uf04b   START"):
+                                        ResetEnvironment()
+                                        StartBot()
+
+                            PyImGui.end_tab_item()        
+
+                if PyImGui.begin_tab_item("STATS"):            
+                        show_info_table_run()
+                        PyImGui.spacing()
+                        PyImGui.end_tab_item()
+                PyImGui.end_tab_bar()
 
         
         PyImGui.end()
