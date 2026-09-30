@@ -3,184 +3,12 @@ import time, Py4GW
 import traceback
 from Py4GWCoreLib import Key,  Map, ImGui, Botting, ActionQueue, Agent
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from Py4GWCoreLib.BottingTree import BottingTree
 from Py4GWCoreLib.py4gwcorelib_src.BehaviorTree import BehaviorTree
-from Py4GWCoreLib.native_src.internals.types import PointOrPath
 from Py4GWCoreLib.routines_src.BehaviourTrees import BT as RoutinesBT
 from Sources.ApoSource.ApoBottingLib import wrappers as BT
-
-# ── BottingTree pilot: Warrior leveling (state.radio_button_selected == 20) ──
-# Ported in-place from state_machine_warrior below to BottingTree/BehaviorTree,
-# reusing every coordinate path and dialog wparam from that FSM verbatim.
-# Combat on the two "fight through" legs reuses state_machine_warrior's own
-# per-tick skill-slot cycling (see _warrior_fight_and_move below) rather than
-# HeroAI: Presearing has no hero/henchman party and no separate HeroAI widget
-# is expected to be running alongside this leveler, so nothing would otherwise
-# ever drive the player's own attacks. Every other profession/farm below is
-# untouched and still runs on its own FSM.
-WARRIOR_BT_ASCALON_OUTPOST = 148
-WARRIOR_BT_WAND_MODEL_ID = 6508
-WARRIOR_BT_SHIELD_MODEL_ID = 6514
-WARRIOR_BT_IMP_STONE_MODEL_ID = 30847
-WARRIOR_BT_TOWN_CRIER_ACCEPT    = 0x805001
-WARRIOR_BT_SIR_TYDUS_REWARD     = 0x805007
-WARRIOR_BT_SIR_TYDUS_REWARD_2   = 0x80DD01
-WARRIOR_BT_VAN_REWARD           = 0x80DD07
-WARRIOR_BT_VAN_ACCEPT           = 0x805501
-WARRIOR_BT_VAN_ACCEPT_2         = 0x805507
-WARRIOR_BT_ALTHEA_ACCEPT        = 0x804703
-WARRIOR_BT_ALTHEA_SKILL         = 0x804701
-WARRIOR_BT_RURIK_ACCEPT         = 0x802E01
-WARRIOR_BT_TOWN_CRIER_PATH    = [(9800, -453), (9983, -483)]
-WARRIOR_BT_SIR_TYDUS_PATH     = [(10780, 1039), (11686, 3444)]
-WARRIOR_BT_ASCALON_EXIT_PATH  = [(7420, 5450)]
-WARRIOR_BT_VAN_PATH           = [(6435, 4295), (6126, 3997)]
-WARRIOR_BT_ALTHEA_PATH        = [(5132, 5130), (2785, 7726)]
-WARRIOR_BT_RURIK_PATH         = [(7555, 10673), (5703, 10663)]
-WARRIOR_BT_QUEST_PATH: list[tuple[float, float]] = [(5639, 2509), (5055, -82), (5793, -3249), (4668, -3311)]
-WARRIOR_BT_LEVELING_PATH: list[tuple[float, float]] = [
-    (1787, 6051), (-1598, 5442), (-1504, 3937), (-4862, 4357), (-4780, 6813),
-    (-6099, 5896), (-4443, 7583), (-5463, 11334), (-8548, 11318), (-8749, 7125),
-    (-8766, 5884), (-7931, 4779), (-7064, 2961),
-]
-
-_warrior_botting_tree: BottingTree | None = None
-
-
-def _warrior_approach_and_dialog(path: PointOrPath, dialog_id: int) -> BehaviorTree:
-    return BT.MoveAndDialog(path, dialog_id=dialog_id, target_distance=800.0, pause_on_combat=False, log=True)
-
-
-class _WarriorFightState:
-    def __init__(self, path: list[tuple[float, float]]) -> None:
-        self.path_handler = Routines.Movement.PathHandler(path)
-        self.follow_handler = Routines.Movement.FollowXY(300)
-        self.current_target_id: int | None = None
-        self.last_target_id: int | None = None
-        self.has_interacted: bool = False
-        self.last_skill_time: float = 0.0
-        self.current_skill_index: int = 2
-
-
-def _warrior_fight_and_move(path: list[tuple[float, float]], name: str,
-                             enemy_scan_range: float = 1200.0, skill_cycle_seconds: float = 2.0) -> BehaviorTree:
-    """Follow a path, auto-fighting the nearest enemy along the way.
-
-    Ported directly from state_machine_warrior's warrior_handle_map_path: scans
-    for the nearest living enemy within enemy_scan_range, targets/interacts with
-    it, then cycles skill slots 2-8 every skill_cycle_seconds. Falls back to
-    plain path-following once no enemies remain in range. This is self-contained
-    (no HeroAI widget dependency) because Presearing has no hero/henchman party
-    to drive combat for the player.
-    """
-    state_holder: list[_WarriorFightState] = []
-
-    def _action() -> BehaviorTree.NodeState:
-        if not state_holder:
-            state_holder.append(_WarriorFightState(path))
-        state = state_holder[0]
-
-        my_id = Player.GetAgentID()
-        my_x, my_y = Agent.GetXY(my_id)
-        current_time = time.time()
-
-        enemy_array = AgentArray.GetEnemyArray()
-        enemy_array = AgentArray.Filter.ByDistance(enemy_array, (my_x, my_y), enemy_scan_range)
-        enemy_array = AgentArray.Filter.ByAttribute(enemy_array, 'IsAlive')
-        enemy_array = AgentArray.Sort.ByDistance(enemy_array, (my_x, my_y))
-
-        if not enemy_array:
-            state.current_target_id = None
-            state.last_target_id = None
-            state.has_interacted = False
-            Routines.Movement.FollowPath(state.path_handler, state.follow_handler)
-            if Routines.Movement.IsFollowPathFinished(state.path_handler, state.follow_handler):
-                return BehaviorTree.NodeState.SUCCESS
-            return BehaviorTree.NodeState.RUNNING
-
-        if (state.current_target_id is None
-                or not Agent.IsAlive(state.current_target_id)
-                or state.current_target_id != state.last_target_id):
-            state.current_target_id = enemy_array[0]
-            state.has_interacted = False
-
-        target_id = state.current_target_id
-        if target_id is None or not Agent.IsAlive(target_id):
-            return BehaviorTree.NodeState.RUNNING
-
-        if not state.has_interacted:
-            Player.Interact(target_id, call_target=False)
-            state.last_target_id = target_id
-            state.has_interacted = True
-
-        if current_time - state.last_skill_time >= skill_cycle_seconds:
-            skill_slot = state.current_skill_index
-            Player.ChangeTarget(target_id)
-            Player.Interact(target_id, call_target=False)
-            SkillBar.UseSkill(skill_slot)
-            state.last_skill_time = current_time
-            state.current_skill_index = 2 if skill_slot >= 8 else skill_slot + 1
-
-        return BehaviorTree.NodeState.RUNNING
-
-    return BehaviorTree(BehaviorTree.ActionNode(_action, name=name))
-
-
-def WarriorLevelingSteps() -> list[tuple[str, Callable[[], BehaviorTree]]]:
-    return [
-        ('Command Bonus', lambda: BT.SendChatCommand('bonus', log=True)),
-        ('Equip Wand', lambda: BT.EquipItemByModelID(WARRIOR_BT_WAND_MODEL_ID, log=True)),
-        ('Equip Shield', lambda: BT.EquipItemByModelID(WARRIOR_BT_SHIELD_MODEL_ID, log=True)),
-        ('Approach Town Crier And Accept Quest', lambda: _warrior_approach_and_dialog(WARRIOR_BT_TOWN_CRIER_PATH, WARRIOR_BT_TOWN_CRIER_ACCEPT)),
-        ('Approach Sir Tydus And Take Reward', lambda: _warrior_approach_and_dialog(WARRIOR_BT_SIR_TYDUS_PATH, WARRIOR_BT_SIR_TYDUS_REWARD)),
-        ('Take Second Reward From Sir Tydus', lambda: BT.SendDialog(WARRIOR_BT_SIR_TYDUS_REWARD_2, log=True)),
-        ('Exit Ascalon City', lambda: BT.Move(WARRIOR_BT_ASCALON_EXIT_PATH, pause_on_combat=False, log=True)),
-        ('Approach Van And Take Reward', lambda: _warrior_approach_and_dialog(WARRIOR_BT_VAN_PATH, WARRIOR_BT_VAN_REWARD)),
-        ('Accept Quest From Van', lambda: BT.SendDialog(WARRIOR_BT_VAN_ACCEPT, log=True)),
-        ('Use Imp Stone (Before Charr Camp)', lambda: RoutinesBT.Items.UseConsumable(WARRIOR_BT_IMP_STONE_MODEL_ID)),
-        ('Fight Through To The Charr Camp', lambda: _warrior_fight_and_move(WARRIOR_BT_QUEST_PATH, 'FightThroughToCharrCamp')),
-        ('Return To Ascalon', lambda: BT.Travel(target_map_id=WARRIOR_BT_ASCALON_OUTPOST, random_travel=False, log=True)),
-        ('Exit Ascalon City Again', lambda: BT.Move(WARRIOR_BT_ASCALON_EXIT_PATH, pause_on_combat=False, log=True)),
-        ('Approach Van Again And Accept Quest', lambda: _warrior_approach_and_dialog(WARRIOR_BT_VAN_PATH, WARRIOR_BT_VAN_ACCEPT_2)),
-        ('Approach Althea And Accept Quest', lambda: _warrior_approach_and_dialog(WARRIOR_BT_ALTHEA_PATH, WARRIOR_BT_ALTHEA_ACCEPT)),
-        ('Take Skill From Althea', lambda: BT.SendDialog(WARRIOR_BT_ALTHEA_SKILL, log=True)),
-        ('Use Imp Stone (Before Ranger Trainer)', lambda: RoutinesBT.Items.UseConsumable(WARRIOR_BT_IMP_STONE_MODEL_ID)),
-        ('Fight Through To The Ranger Trainer', lambda: _warrior_fight_and_move(WARRIOR_BT_LEVELING_PATH, 'FightThroughToRangerTrainer')),
-        ('Return To Ascalon Again', lambda: BT.Travel(target_map_id=WARRIOR_BT_ASCALON_OUTPOST, random_travel=False, log=True)),
-        ('Approach Prince Rurik And Accept Quest', lambda: _warrior_approach_and_dialog(WARRIOR_BT_RURIK_PATH, WARRIOR_BT_RURIK_ACCEPT)),
-    ]
-
-
-def ensure_warrior_botting_tree() -> BottingTree:
-    global _warrior_botting_tree
-    if _warrior_botting_tree is None:
-        _warrior_botting_tree = BottingTree.Create(
-            'LDoA Warrior (BT)',
-            main_routine=WarriorLevelingSteps(),
-            routine_name='WarriorLevelingSequence',
-            repeat=False,
-            multi_account=False,
-            isolation_enabled=True,
-        )
-    return _warrior_botting_tree
-
-
-def TickWarriorBottingTree() -> bool:
-    """Drive the Warrior BottingTree from the existing Start/Stop button state.
-
-    Returns True once the sequence has completed, so callers can mirror
-    state_machine_warrior.is_finished()'s behavior."""
-    tree = ensure_warrior_botting_tree()
-    if IsBotStarted() and not tree.IsStarted():
-        tree.Start()
-    elif not IsBotStarted() and tree.IsStarted():
-        tree.Stop()
-
-    if tree.IsStarted():
-        tree.tick()
-
-    return tree.tree.blackboard.get('PLANNER_STATUS') == 'PLANNER: Completed'
 
 
 #VARIABLES
@@ -381,6 +209,1496 @@ barradinout_coordinate_list = [(7954, 5862),(7430, 5480),(7410, 5480)]
 barradin_coordinate_list_one = [(6558, 4489),(5233, 5033),(3979, 5754),(2732, 6470),(1491, 7069),(258, 7412),(-962, 8152),(-2149, 8973),(-3284, 9842),(-3890, 10510),(-5070, 11302),(-6496, 11491),(-7890, 11304),(-8648, 10100),(-9374, 8859),(-10468, 7955),(-11728, 8344),(-12897, 9191),(-14117, 9957),(-14600, 10060)]
 barradin_coordinate_list_two = [(21932, 12966),(20720, 13561),(19394, 13174),(18149, 12450),(17131, 11462),(16396, 10223),(15660, 8984),(14871, 7778),(14080, 6573),(13372, 5317),(12640, 4076),(11617, 3237),(10499, 2614),(10646,1180),(11326, -16),(11564, -1417),(10516, -2215),(9233, -2842),(7825, -3180),(6458, -3523),(5016, -3411),(3579, -3350),(2140, -3313),(696, -3293),(-512, -2603),(-1779, -1983),(-2953, -1141),(-4317, -695),(-5735, -423),(-7139, -154),(-7815, 751),(-7511, 1442),(-7310, 1456)]
 
+
+WARRIOR_WAND_MODEL_ID = 6508
+WARRIOR_SHIELD_MODEL_ID = 6514
+RANGER_NEVERMORE_FLATBOW_MODEL_ID = ModelID.Bonus_Nevermore_Flatbow.value
+NECROMANCER_SOUL_SHRIEKER_MODEL_ID = ModelID.Bonus_Soul_Shrieker.value
+FIRE_IMP_STONE_MODEL_ID = 30847
+SHIMMERING_SCALE_MODEL_ID = ModelID.Shimmering_Scale.value
+
+BONUS_ITEM_MODEL_IDS = frozenset(RoutinesBT.Items.BONUS_ITEM_MODELS)
+PROTECTED_BONUS_ITEM_MODEL_IDS = frozenset(
+    {
+        ModelID.DarksteelLongbow.value,
+        ModelID.GlacialBlade.value,
+        ModelID.HourglassStaffDomination.value,
+        ModelID.HourglassStaffFastcasting.value,
+        ModelID.HourglassStaffIllusion.value,
+        ModelID.HourglassStaffInspiration.value,
+        ModelID.HourglassStaffSoulReaping.value,
+        ModelID.HourglassStaffBloodMagic.value,
+        ModelID.HourglassStaffCurses.value,
+        ModelID.HourglassStaffDeathMagic.value,
+        ModelID.HourglassStaffAirMagic.value,
+        ModelID.HourglassStaffEarthMagic.value,
+        ModelID.HourglassStaffEnergyStorage.value,
+        ModelID.HourglassStaffFireMagic.value,
+        ModelID.HourglassStaffWaterMagic.value,
+        ModelID.HourglassStaffDivineFavor.value,
+        ModelID.HourglassStaffHealingPrayers.value,
+        ModelID.HourglassStaffProtectionPrayers.value,
+        ModelID.HourglassStaffSmitingPrayers.value,
+        ModelID.HourglassStaffCommuning.value,
+        ModelID.HourglassStaffSpawningPower.value,
+        ModelID.HourglassStaffRestoration.value,
+        ModelID.HourglassStaffChanneling.value,
+    }
+)
+KNOWN_BONUS_ITEM_MODEL_IDS = BONUS_ITEM_MODEL_IDS | PROTECTED_BONUS_ITEM_MODEL_IDS
+
+
+@dataclass(frozen=True)
+class PreSearingSkill:
+    name: str
+    requires_target: bool = False
+    target_self: bool = False
+    use_below_health: float | None = None
+    use_above_health: float | None = None
+    maintain_effect: bool = False
+    maintain_target_effect: bool = False
+
+
+@dataclass(frozen=True)
+class PreSearingBuild:
+    primary_profession: str
+    stage_name: str
+    skill_priority: tuple[PreSearingSkill, ...]
+
+
+WARRIOR_INITIAL_BUILD = PreSearingBuild(
+    primary_profession="Warrior",
+    stage_name="Warrior: Before Warrior Test Reward",
+    skill_priority=(),
+)
+
+WARRIOR_AFTER_TRAINER_BUILD = PreSearingBuild(
+    primary_profession="Warrior",
+    stage_name="Warrior: After Warrior Test Reward",
+    skill_priority=(
+        PreSearingSkill("Healing_Signet", use_below_health=0.55),
+        PreSearingSkill("Frenzy", use_above_health=0.60, maintain_effect=True),
+    ),
+)
+
+RANGER_AFTER_ARTEMIS_BUILD = PreSearingBuild(
+    primary_profession="Ranger",
+    stage_name="Ranger: After Ranger Test Accepted",
+    skill_priority=(
+        PreSearingSkill("Troll_Unguent", use_below_health=0.75, maintain_effect=True),
+        PreSearingSkill("Power_Shot", requires_target=True),
+    ),
+)
+
+MONK_BEFORE_TEST_REWARD_BUILD = PreSearingBuild(
+    primary_profession="Monk",
+    stage_name="Monk: Before Monk Test Reward",
+    skill_priority=(),
+)
+
+MONK_AFTER_CIGLO_REWARD_BUILD = PreSearingBuild(
+    primary_profession="Monk",
+    stage_name="Monk: After Ciglo Reward",
+    skill_priority=(
+        PreSearingSkill(
+            "Healing_Breeze",
+            target_self=True,
+            use_below_health=0.65,
+            maintain_effect=True,
+        ),
+        PreSearingSkill("Banish", requires_target=True),
+    ),
+)
+
+NECROMANCER_BEFORE_TEST_BUILD = PreSearingBuild(
+    primary_profession="Necromancer",
+    stage_name="Necromancer: Before Necromancer Test",
+    skill_priority=(),
+)
+
+NECROMANCER_AFTER_VERATA_BUILD = PreSearingBuild(
+    primary_profession="Necromancer",
+    stage_name="Necromancer: After Verata Quest Acceptance",
+    skill_priority=(
+        PreSearingSkill("Vampiric_Gaze", requires_target=True, use_below_health=0.75),
+        PreSearingSkill("Deathly_Swarm", requires_target=True),
+        PreSearingSkill("Vampiric_Gaze", requires_target=True),
+    ),
+)
+
+MESMER_BEFORE_TEST_REWARD_BUILD = PreSearingBuild(
+    primary_profession="Mesmer",
+    stage_name="Mesmer: Before Mesmer Test Reward",
+    skill_priority=(),
+)
+
+MESMER_AFTER_SEBEDOH_REWARD_BUILD = PreSearingBuild(
+    primary_profession="Mesmer",
+    stage_name="Mesmer: After Sebedoh Reward",
+    skill_priority=(
+        PreSearingSkill("Ether_Feast", requires_target=True, use_below_health=0.65),
+        PreSearingSkill("Empathy", requires_target=True, maintain_target_effect=True),
+        PreSearingSkill("Ether_Feast", requires_target=True),
+    ),
+)
+
+ELEMENTALIST_AFTER_HOWLAND_BUILD = PreSearingBuild(
+    primary_profession="Elementalist",
+    stage_name="Elementalist: After Elementalist Test Acceptance",
+    skill_priority=(
+        PreSearingSkill("Aura_of_Restoration", maintain_effect=True),
+        PreSearingSkill("Flare", requires_target=True),
+    ),
+)
+
+
+class _PreSearingCombatPathState:
+    def __init__(self, path: list[tuple[float, float]]) -> None:
+        self.path_handler = Routines.Movement.PathHandler(path)
+        self.follow_handler = Routines.Movement.FollowXY(300)
+        self.current_target_id = 0
+        self.last_interact_time = 0.0
+        self.last_skill_time = 0.0
+
+
+_presearing_skill_ids: dict[str, int] = {}
+
+
+def _skill_id_by_name(skill_name: str) -> int:
+    skill_id = _presearing_skill_ids.get(skill_name)
+    if skill_id is None:
+        skill_id = int(GLOBAL_CACHE.Skill.GetID(skill_name) or 0)
+        if skill_id:
+            _presearing_skill_ids[skill_name] = skill_id
+    return skill_id or 0
+
+
+def _can_use_presearing_skill(rule: PreSearingSkill, target_id: int) -> tuple[bool, int]:
+    player_id = Player.GetAgentID()
+    skill_id = _skill_id_by_name(rule.name)
+    if skill_id == 0:
+        return False, 0
+
+    slot = int(SkillBar.GetSlotBySkillID(skill_id) or 0)
+    if not 1 <= slot <= 8:
+        return False, 0
+    if rule.requires_target and (target_id == 0 or not Agent.IsAlive(target_id)):
+        return False, 0
+    if rule.use_below_health is not None and Agent.GetHealth(player_id) > rule.use_below_health:
+        return False, 0
+    if rule.use_above_health is not None and Agent.GetHealth(player_id) < rule.use_above_health:
+        return False, 0
+    if rule.maintain_effect and GLOBAL_CACHE.Effects.HasEffect(player_id, skill_id):
+        return False, 0
+    if rule.maintain_target_effect and GLOBAL_CACHE.Effects.HasEffect(target_id, skill_id):
+        return False, 0
+    if not Routines.Checks.Skills.CanCast():
+        return False, 0
+    if not Routines.Checks.Skills.IsSkillSlotReady(slot):
+        return False, 0
+    if not Routines.Checks.Skills.HasEnoughEnergy(player_id, skill_id):
+        return False, 0
+    if not Routines.Checks.Skills.HasEnoughAdrenalineBySlot(slot):
+        return False, 0
+    return True, slot
+
+
+def _use_presearing_build_skill(build: PreSearingBuild, target_id: int) -> bool:
+    for rule in build.skill_priority:
+        can_use, slot = _can_use_presearing_skill(rule, target_id)
+        if not can_use:
+            continue
+        if rule.target_self:
+            SkillBar.UseSkill(slot, Player.GetAgentID())
+        elif rule.requires_target:
+            SkillBar.UseSkill(slot, target_id)
+        else:
+            SkillBar.UseSkillTargetless(slot)
+        return True
+    return False
+
+
+def _presearing_clear_path(
+    path: list[tuple[float, float]],
+    build: PreSearingBuild,
+    enemy_scan_range: float,
+    name: str,
+    loot_when_clear: bool = False,
+) -> BehaviorTree:
+    state = _PreSearingCombatPathState(path)
+
+    def _clear_then_move() -> BehaviorTree.NodeState:
+        if not Map.IsMapReady() or not Map.IsExplorable() or not Party.IsPartyLoaded():
+            return BehaviorTree.NodeState.RUNNING
+
+        player_id = Player.GetAgentID()
+        if player_id == 0 or Agent.IsDead(player_id):
+            state.current_target_id = 0
+            return BehaviorTree.NodeState.RUNNING
+
+        player_xy = Agent.GetXY(player_id)
+        enemies = AgentArray.GetEnemyArray()
+        enemies = AgentArray.Filter.ByDistance(enemies, player_xy, enemy_scan_range)
+        enemies = AgentArray.Filter.ByAttribute(enemies, "IsAlive")
+        enemies = AgentArray.Sort.ByDistance(enemies, player_xy)
+
+        if not enemies:
+            state.current_target_id = 0
+            if loot_when_clear:
+                handle_loot()
+            Routines.Movement.FollowPath(state.path_handler, state.follow_handler)
+            if Routines.Movement.IsFollowPathFinished(state.path_handler, state.follow_handler):
+                return BehaviorTree.NodeState.SUCCESS
+            return BehaviorTree.NodeState.RUNNING
+
+        if state.current_target_id not in enemies or not Agent.IsAlive(state.current_target_id):
+            state.current_target_id = int(enemies[0])
+            state.last_interact_time = 0.0
+
+        target_id = state.current_target_id
+        now = time.time()
+        if now - state.last_interact_time >= 1.0:
+            Player.ChangeTarget(target_id)
+            Player.Interact(target_id, call_target=False)
+            state.last_interact_time = now
+
+        if now - state.last_skill_time >= 0.5 and _use_presearing_build_skill(build, target_id):
+            state.last_skill_time = now
+
+        return BehaviorTree.NodeState.RUNNING
+
+    return BehaviorTree(BehaviorTree.ActionNode(_clear_then_move, name=name))
+
+
+def _move_until_explorable(path: list[tuple[float, float]], name: str) -> BehaviorTree:
+    path_handler = Routines.Movement.PathHandler(path)
+    follow_handler = Routines.Movement.FollowXY(300)
+
+    def _move_or_zone() -> BehaviorTree.NodeState:
+        if Map.IsMapReady() and Map.IsExplorable() and Party.IsPartyLoaded():
+            return BehaviorTree.NodeState.SUCCESS
+        if not Map.IsMapReady():
+            return BehaviorTree.NodeState.RUNNING
+        Routines.Movement.FollowPath(path_handler, follow_handler)
+        if Routines.Movement.IsFollowPathFinished(path_handler, follow_handler):
+            return BehaviorTree.NodeState.SUCCESS
+        return BehaviorTree.NodeState.RUNNING
+
+    return BehaviorTree(BehaviorTree.ActionNode(_move_or_zone, name=name))
+
+
+def _wait_for_map_mode(explorable: bool, name: str) -> BehaviorTree:
+    def _map_is_ready() -> BehaviorTree.NodeState:
+        ready = Map.IsMapReady() and Party.IsPartyLoaded()
+        correct_mode = Map.IsExplorable() if explorable else LDoA_IsOutpost()
+        if ready and correct_mode:
+            return BehaviorTree.NodeState.SUCCESS
+        return BehaviorTree.NodeState.RUNNING
+
+    return BehaviorTree(
+        BehaviorTree.WaitUntilNode(
+            condition_fn=_map_is_ready,
+            throttle_interval_ms=250,
+            timeout_ms=0,
+            name=name,
+        )
+    )
+
+
+def _prepare_bonus_equipment(
+    equipment_model_ids: tuple[int, ...],
+    retained_model_ids: frozenset[int],
+    name: str,
+) -> BehaviorTree:
+    before_item_ids: set[int] = set()
+    spawned_bonus_items: dict[int, int] = {}
+    delete_queue: list[int] = []
+    delete_queue_initialized = False
+    active_delete_item_id = 0
+    active_delete_requested_at = 0.0
+    active_delete_attempts = 0
+
+    def _snapshot_inventory() -> BehaviorTree.NodeState:
+        before_item_ids.clear()
+        before_item_ids.update(int(item_id) for item_id in GLOBAL_CACHE.Inventory.GetAllInventoryItemIds())
+        spawned_bonus_items.clear()
+        return BehaviorTree.NodeState.SUCCESS
+
+    def _capture_spawned_bonus_items() -> BehaviorTree.NodeState:
+        current_item_ids = {
+            int(item_id)
+            for item_id in GLOBAL_CACHE.Inventory.GetAllInventoryItemIds()
+        }
+        spawned_bonus_items.clear()
+        for item_id in current_item_ids - before_item_ids:
+            model_id = int(Item.GetModelID(item_id) or 0)
+            if model_id in KNOWN_BONUS_ITEM_MODEL_IDS:
+                spawned_bonus_items[item_id] = model_id
+        return BehaviorTree.NodeState.SUCCESS
+
+    def _destroy_unwanted_spawned_items() -> BehaviorTree.NodeState:
+        nonlocal active_delete_item_id
+        nonlocal active_delete_requested_at
+        nonlocal active_delete_attempts
+        nonlocal delete_queue_initialized
+
+        current_item_ids = {
+            int(item_id)
+            for item_id in GLOBAL_CACHE.Inventory.GetAllInventoryItemIds()
+        }
+
+        if active_delete_item_id:
+            if active_delete_item_id not in current_item_ids:
+                active_delete_item_id = 0
+                active_delete_attempts = 0
+            elif time.time() - active_delete_requested_at < 1.0:
+                return BehaviorTree.NodeState.RUNNING
+            elif active_delete_attempts < 3:
+                GLOBAL_CACHE.Inventory.DestroyItem(active_delete_item_id)
+                active_delete_requested_at = time.time()
+                active_delete_attempts += 1
+                return BehaviorTree.NodeState.RUNNING
+            else:
+                PySystem.Console.Log(
+                    module_name,
+                    f"Could not destroy spawned /bonus item {active_delete_item_id}; leaving it untouched.",
+                    PySystem.Console.MessageType.Warning,
+                )
+                active_delete_item_id = 0
+                active_delete_attempts = 0
+
+        if not delete_queue_initialized:
+            delete_queue.extend(spawned_bonus_items)
+            delete_queue_initialized = True
+
+        while delete_queue:
+            item_id = delete_queue.pop(0)
+            expected_model_id = spawned_bonus_items[item_id]
+            if (
+                expected_model_id in retained_model_ids
+                or expected_model_id in PROTECTED_BONUS_ITEM_MODEL_IDS
+                or item_id not in current_item_ids
+            ):
+                continue
+            current_model_id = int(Item.GetModelID(item_id) or 0)
+            if current_model_id != expected_model_id or current_model_id not in KNOWN_BONUS_ITEM_MODEL_IDS:
+                continue
+            GLOBAL_CACHE.Inventory.DestroyItem(item_id)
+            active_delete_item_id = item_id
+            active_delete_requested_at = time.time()
+            active_delete_attempts = 1
+            return BehaviorTree.NodeState.RUNNING
+
+        return BehaviorTree.NodeState.SUCCESS
+
+    children: list[BehaviorTree] = [
+        BehaviorTree(
+            BehaviorTree.ActionNode(
+                name=f"{name}: Snapshot Inventory",
+                action_fn=_snapshot_inventory,
+            )
+        ),
+        BT.SendChatCommand(text_bonus, log=True),
+        _wait_for_map_mode(explorable=False, name=f"{name}: Bonus Outpost Check"),
+        BT.Wait(1000),
+        BehaviorTree(
+            BehaviorTree.ActionNode(
+                name=f"{name}: Capture Spawned Bonus Items",
+                action_fn=_capture_spawned_bonus_items,
+            )
+        ),
+    ]
+
+    for model_id in equipment_model_ids:
+        children.extend(
+            (
+                BT.EquipItemByModelID(model_id, log=True),
+                _wait_for_map_mode(explorable=False, name=f"{name}: Equipment Outpost Check"),
+                BT.Wait(1000),
+            )
+        )
+
+    children.append(
+        BehaviorTree(
+            BehaviorTree.ActionNode(
+                name=f"{name}: Destroy Unwanted Spawned Bonus Items",
+                action_fn=_destroy_unwanted_spawned_items,
+                aftercast_ms=1000,
+            )
+        )
+    )
+    return RoutinesBT.Composite.Sequence(*children, name=name)
+
+
+def _pickup_required_ground_item(model_id: int, name: str) -> BehaviorTree:
+    verify_started_at = 0.0
+
+    def _has_item() -> bool:
+        return GLOBAL_CACHE.Inventory.GetModelCount(model_id) > 0
+
+    def _verify_item() -> BehaviorTree.NodeState:
+        nonlocal verify_started_at
+        if _has_item():
+            verify_started_at = 0.0
+            return BehaviorTree.NodeState.SUCCESS
+        if verify_started_at == 0.0:
+            verify_started_at = time.monotonic()
+        if time.monotonic() - verify_started_at >= 5.0:
+            PySystem.Console.Log(
+                module_name,
+                f"Required item model {model_id} was not found in inventory after pickup.",
+                PySystem.Console.MessageType.Warning,
+            )
+            verify_started_at = 0.0
+            return BehaviorTree.NodeState.FAILURE
+        return BehaviorTree.NodeState.RUNNING
+
+    pickup_and_verify = RoutinesBT.Composite.Sequence(
+        RoutinesBT.Items.PickupGroundItemByModelID(
+            model_ids=model_id,
+            max_distance=1200.0,
+            timeout_ms=15000,
+            allow_unassigned=True,
+            interaction_interval_ms=1000,
+            aftercast_ms=100,
+            log=True,
+        ),
+        BehaviorTree(
+            BehaviorTree.ActionNode(
+                action_fn=_verify_item,
+                name=f"{name}: Verify Inventory",
+            )
+        ),
+        name=f"{name}: Pickup And Verify",
+    )
+    return BehaviorTree(
+        BehaviorTree.SelectorNode(
+            children=[
+                BehaviorTree.ConditionNode(
+                    condition_fn=_has_item,
+                    name=f"{name}: Already Collected",
+                ),
+                BehaviorTree.SubtreeNode(
+                    name=f"{name}: Required Pickup",
+                    subtree_fn=lambda node: pickup_and_verify,
+                ),
+            ],
+            name=name,
+        )
+    )
+
+
+def _move_interact_and_dialog(
+    path: list[tuple[float, float]],
+    dialogs: tuple[tuple[int, int], ...],
+    name: str,
+) -> BehaviorTree:
+    children: list[BehaviorTree] = [
+        BT.Move(path, pause_on_combat=False, log=True),
+        BT.TargetNearestAndInteract(path, target_distance=800.0, log=True),
+        BT.Wait(2000),
+    ]
+    for dialog_id, transition_delay_ms in dialogs:
+        children.extend((BT.SendDialog(dialog_id, log=True), BT.Wait(transition_delay_ms)))
+    return RoutinesBT.Composite.Sequence(*children, name=name)
+
+
+def _interact_at_path_end(path: list[tuple[float, float]], name: str) -> BehaviorTree:
+    return RoutinesBT.Composite.Sequence(
+        BT.TargetNearestAndInteract(path, target_distance=800.0, log=True),
+        BT.Wait(2000),
+        name=name,
+    )
+
+
+def _return_to_ascalon(name: str) -> BehaviorTree:
+    return RoutinesBT.Composite.Sequence(
+        BT.Travel(target_map_id=bot_vars.ascalon_map, random_travel=False, log=True),
+        _wait_for_map_mode(explorable=False, name=f"{name}: Wait For Outpost"),
+        BT.Wait(2500),
+        name=name,
+    )
+
+
+def WarriorLevelingSteps() -> list[tuple[str, Callable[[], BehaviorTree]]]:
+    return [
+        (
+            "Warrior: Bonus",
+            lambda: _prepare_bonus_equipment(
+                equipment_model_ids=(WARRIOR_WAND_MODEL_ID, WARRIOR_SHIELD_MODEL_ID),
+                retained_model_ids=frozenset(
+                    {
+                        WARRIOR_WAND_MODEL_ID,
+                        WARRIOR_SHIELD_MODEL_ID,
+                        FIRE_IMP_STONE_MODEL_ID,
+                    }
+                ),
+                name="WarriorBonusAndEquipment",
+            ),
+        ),
+        (
+            "Warrior: Town Crier",
+            lambda: _move_interact_and_dialog(
+                town_crier_coordinate_list,
+                ((0x805001, 300),),
+                "WarriorTownCrier",
+            ),
+        ),
+        (
+            "Warrior: Sir Tydus",
+            lambda: _move_interact_and_dialog(
+                sir_tydus_coordinate_list,
+                ((0x805007, 1500), (0x80DD01, 1500)),
+                "WarriorSirTydus",
+            ),
+        ),
+        (
+            "Warrior: Leaving Ascalon",
+            lambda: RoutinesBT.Composite.Sequence(
+                _move_until_explorable(ascalon_coordinate_list, "WarriorLeaveAscalon"),
+                _wait_for_map_mode(explorable=True, name="WarriorWaitForExplorable"),
+                BT.Wait(1500),
+                name="WarriorLeavingAscalon",
+            ),
+        ),
+        (
+            "Warrior: Trainer",
+            lambda: _move_interact_and_dialog(
+                van_coordinate_list,
+                ((0x80DD07, 1500), (0x805501, 1500)),
+                "WarriorTrainer",
+            ),
+        ),
+        (
+            "Warrior: Profession Quest Combat",
+            lambda: RoutinesBT.Composite.Sequence(
+                RoutinesBT.Items.UseConsumable(FIRE_IMP_STONE_MODEL_ID),
+                _presearing_clear_path(
+                    warrior_quest_coordinate_list,
+                    WARRIOR_INITIAL_BUILD,
+                    enemy_scan_range=1150.0,
+                    name="WarriorProfessionQuestClearPath",
+                ),
+                name="WarriorProfessionQuestCombat",
+            ),
+        ),
+        ("Warrior: Returning to Ascalon", lambda: _return_to_ascalon("WarriorFirstReturn")),
+        (
+            "Warrior: Althea",
+            lambda: RoutinesBT.Composite.Sequence(
+                _move_until_explorable(ascalon_coordinate_list, "WarriorLeaveAscalonAgain"),
+                _wait_for_map_mode(explorable=True, name="WarriorWaitForExplorableAgain"),
+                BT.Wait(1500),
+                _move_interact_and_dialog(
+                    van_coordinate_list,
+                    ((0x805507, 1500),),
+                    "WarriorTrainerReward",
+                ),
+                _move_interact_and_dialog(
+                    althea_coordinate_list,
+                    ((0x804703, 1500), (0x804701, 1500)),
+                    "WarriorAlthea",
+                ),
+                name="WarriorAltheaStage",
+            ),
+        ),
+        (
+            "Warrior: Leveling Combat",
+            lambda: RoutinesBT.Composite.Sequence(
+                RoutinesBT.Items.UseConsumable(FIRE_IMP_STONE_MODEL_ID),
+                _presearing_clear_path(
+                    leveling_coordinate_list,
+                    WARRIOR_AFTER_TRAINER_BUILD,
+                    enemy_scan_range=1200.0,
+                    name="WarriorLevelingClearPath",
+                ),
+                name="WarriorLevelingCombat",
+            ),
+        ),
+        (
+            "Warrior: Prince Rurik",
+            lambda: RoutinesBT.Composite.Sequence(
+                _return_to_ascalon("WarriorSecondReturn"),
+                _move_interact_and_dialog(
+                    taking_quest_coordinate_list,
+                    ((0x802E01, 1500),),
+                    "WarriorPrinceRurik",
+                ),
+                name="WarriorPrinceRurikStage",
+            ),
+        ),
+    ]
+
+
+_warrior_botting_tree: BottingTree | None = None
+
+
+def ensure_warrior_botting_tree() -> BottingTree:
+    global _warrior_botting_tree
+    if _warrior_botting_tree is None:
+        _warrior_botting_tree = BottingTree.Create(
+            "LDoA Warrior",
+            main_routine=WarriorLevelingSteps(),
+            routine_name="WarriorLevelingSequence",
+            repeat=False,
+            pause_on_combat=False,
+            multi_account=False,
+            auto_loot=False,
+            isolation_enabled=False,
+        )
+        _warrior_botting_tree.SetHeadlessHeroAIEnabled(False)
+        _warrior_botting_tree.SetHeroAIStateLogging(False)
+    return _warrior_botting_tree
+
+
+def ResetWarriorBottingTree() -> None:
+    global _warrior_botting_tree
+    if _warrior_botting_tree is not None:
+        if _warrior_botting_tree.IsStarted():
+            _warrior_botting_tree.Stop()
+        else:
+            _warrior_botting_tree.Reset()
+    _warrior_botting_tree = None
+
+
+def TickWarriorBottingTree() -> bool:
+    tree = ensure_warrior_botting_tree()
+    if tree.tree.blackboard.get("PLANNER_STATUS") == "PLANNER: Completed":
+        return True
+    if IsBotStarted() and not tree.IsStarted():
+        tree.Start()
+    elif not IsBotStarted() and tree.IsStarted():
+        tree.Stop()
+
+    if tree.IsStarted():
+        tree.tick()
+
+    return tree.tree.blackboard.get("PLANNER_STATUS") == "PLANNER: Completed"
+
+
+def RangerLevelingSteps() -> list[tuple[str, Callable[[], BehaviorTree]]]:
+    return [
+        (
+            "Ranger: Bonus",
+            lambda: _prepare_bonus_equipment(
+                equipment_model_ids=(RANGER_NEVERMORE_FLATBOW_MODEL_ID,),
+                retained_model_ids=frozenset(
+                    {
+                        RANGER_NEVERMORE_FLATBOW_MODEL_ID,
+                        FIRE_IMP_STONE_MODEL_ID,
+                    }
+                ),
+                name="RangerBonusEquipment",
+            ),
+        ),
+        (
+            "Ranger: Town Crier",
+            lambda: _move_interact_and_dialog(
+                town_crier_coordinate_list,
+                ((0x805001, 300),),
+                "RangerTownCrier",
+            ),
+        ),
+        (
+            "Ranger: Sir Tydus",
+            lambda: _move_interact_and_dialog(
+                sir_tydus_coordinate_list,
+                ((0x805007, 1500), (0x80DE01, 1500)),
+                "RangerSirTydus",
+            ),
+        ),
+        (
+            "Ranger: Leaving Ascalon",
+            lambda: RoutinesBT.Composite.Sequence(
+                _move_until_explorable(ascalon_coordinate_list, "RangerLeaveAscalon"),
+                _wait_for_map_mode(explorable=True, name="RangerWaitForExplorable"),
+                BT.Wait(1500),
+                name="RangerLeavingAscalon",
+            ),
+        ),
+        (
+            "Ranger: Trainer",
+            lambda: _move_interact_and_dialog(
+                artemis_coordinate_list,
+                ((0x80DE07, 1500), (0x805601, 1500)),
+                "RangerTrainer",
+            ),
+        ),
+        (
+            "Ranger: Profession Quest Combat",
+            lambda: RoutinesBT.Composite.Sequence(
+                RoutinesBT.Items.UseConsumable(FIRE_IMP_STONE_MODEL_ID),
+                _presearing_clear_path(
+                    ranger_quest_coordinate_list,
+                    RANGER_AFTER_ARTEMIS_BUILD,
+                    enemy_scan_range=1150.0,
+                    name="RangerProfessionQuestClearPath",
+                ),
+                name="RangerProfessionQuestCombat",
+            ),
+        ),
+        ("Ranger: Returning to Ascalon", lambda: _return_to_ascalon("RangerFirstReturn")),
+        (
+            "Ranger: Artemis Reward and Althea",
+            lambda: RoutinesBT.Composite.Sequence(
+                _move_until_explorable(ascalon_coordinate_list, "RangerLeaveAscalonAgain"),
+                _wait_for_map_mode(explorable=True, name="RangerWaitForExplorableAgain"),
+                BT.Wait(1500),
+                _move_interact_and_dialog(
+                    artemis_coordinate_list,
+                    ((0x805607, 1500),),
+                    "RangerTrainerReward",
+                ),
+                _move_interact_and_dialog(
+                    althea_coordinate_list,
+                    ((0x804703, 1500), (0x804701, 1500)),
+                    "RangerAlthea",
+                ),
+                name="RangerArtemisRewardAndAlthea",
+            ),
+        ),
+        (
+            "Ranger: Leveling Combat",
+            lambda: RoutinesBT.Composite.Sequence(
+                RoutinesBT.Items.UseConsumable(FIRE_IMP_STONE_MODEL_ID),
+                _presearing_clear_path(
+                    leveling_coordinate_list,
+                    RANGER_AFTER_ARTEMIS_BUILD,
+                    enemy_scan_range=1200.0,
+                    name="RangerLevelingClearPath",
+                ),
+                name="RangerLevelingCombat",
+            ),
+        ),
+        (
+            "Ranger: Prince Rurik",
+            lambda: RoutinesBT.Composite.Sequence(
+                _return_to_ascalon("RangerSecondReturn"),
+                _move_interact_and_dialog(
+                    taking_quest_coordinate_list,
+                    ((0x802E01, 1500),),
+                    "RangerPrinceRurik",
+                ),
+                name="RangerPrinceRurikStage",
+            ),
+        ),
+    ]
+
+
+_ranger_botting_tree: BottingTree | None = None
+
+
+def ensure_ranger_botting_tree() -> BottingTree:
+    global _ranger_botting_tree
+    if _ranger_botting_tree is None:
+        _ranger_botting_tree = BottingTree.Create(
+            "LDoA Ranger",
+            main_routine=RangerLevelingSteps(),
+            routine_name="RangerLevelingSequence",
+            repeat=False,
+            pause_on_combat=False,
+            multi_account=False,
+            auto_loot=False,
+            isolation_enabled=False,
+        )
+        _ranger_botting_tree.SetHeadlessHeroAIEnabled(False)
+        _ranger_botting_tree.SetHeroAIStateLogging(False)
+    return _ranger_botting_tree
+
+
+def ResetRangerBottingTree() -> None:
+    global _ranger_botting_tree
+    if _ranger_botting_tree is not None:
+        if _ranger_botting_tree.IsStarted():
+            _ranger_botting_tree.Stop()
+        else:
+            _ranger_botting_tree.Reset()
+    _ranger_botting_tree = None
+
+
+def TickRangerBottingTree() -> bool:
+    tree = ensure_ranger_botting_tree()
+    if tree.tree.blackboard.get("PLANNER_STATUS") == "PLANNER: Completed":
+        return True
+    if IsBotStarted() and not tree.IsStarted():
+        tree.Start()
+    elif not IsBotStarted() and tree.IsStarted():
+        tree.Stop()
+
+    if tree.IsStarted():
+        tree.tick()
+
+    return tree.tree.blackboard.get("PLANNER_STATUS") == "PLANNER: Completed"
+
+
+def MonkLevelingSteps() -> list[tuple[str, Callable[[], BehaviorTree]]]:
+    return [
+        (
+            "Monk: Bonus",
+            lambda: _prepare_bonus_equipment(
+                equipment_model_ids=(WARRIOR_WAND_MODEL_ID, WARRIOR_SHIELD_MODEL_ID),
+                retained_model_ids=frozenset(
+                    {
+                        WARRIOR_WAND_MODEL_ID,
+                        WARRIOR_SHIELD_MODEL_ID,
+                        FIRE_IMP_STONE_MODEL_ID,
+                    }
+                ),
+                name="MonkBonusAndEquipment",
+            ),
+        ),
+        (
+            "Monk: Town Crier",
+            lambda: _move_interact_and_dialog(
+                town_crier_coordinate_list,
+                ((0x805001, 300),),
+                "MonkTownCrier",
+            ),
+        ),
+        (
+            "Monk: Sir Tydus",
+            lambda: _move_interact_and_dialog(
+                sir_tydus_coordinate_list,
+                ((0x805007, 1500), (0x80DC01, 1500)),
+                "MonkSirTydus",
+            ),
+        ),
+        (
+            "Monk: Leaving Ascalon",
+            lambda: RoutinesBT.Composite.Sequence(
+                _move_until_explorable(ascalon_coordinate_list, "MonkLeaveAscalon"),
+                _wait_for_map_mode(explorable=True, name="MonkWaitForExplorable"),
+                BT.Wait(1500),
+                name="MonkLeavingAscalon",
+            ),
+        ),
+        (
+            "Monk: Ciglo",
+            lambda: _move_interact_and_dialog(
+                ciglo_coordinate_list,
+                ((0x80DC07, 1500), (0x805401, 1500)),
+                "MonkCiglo",
+            ),
+        ),
+        (
+            "Monk: Rescue Gwen",
+            lambda: RoutinesBT.Composite.Sequence(
+                _presearing_clear_path(
+                    monk_quest_coordinate_list_1,
+                    MONK_BEFORE_TEST_REWARD_BUILD,
+                    enemy_scan_range=1150.0,
+                    name="MonkRescueGwenClearPath",
+                ),
+                _interact_at_path_end(monk_quest_coordinate_list_1, "MonkInteractGwen"),
+                name="MonkRescueGwen",
+            ),
+        ),
+        (
+            "Monk: Return to Ciglo",
+            lambda: RoutinesBT.Composite.Sequence(
+                _presearing_clear_path(
+                    monk_quest_coordinate_list_2,
+                    MONK_BEFORE_TEST_REWARD_BUILD,
+                    enemy_scan_range=1150.0,
+                    name="MonkReturnToCigloClearPath",
+                ),
+                _interact_at_path_end(monk_quest_coordinate_list_2, "MonkInteractCiglo"),
+                BT.SendDialog(0x805407, log=True),
+                BT.Wait(1500),
+                name="MonkReturnToCiglo",
+            ),
+        ),
+        (
+            "Monk: Althea",
+            lambda: _move_interact_and_dialog(
+                althea_coordinate_list,
+                ((0x804703, 1500), (0x804701, 1500)),
+                "MonkAlthea",
+            ),
+        ),
+        (
+            "Monk: Leveling Combat",
+            lambda: RoutinesBT.Composite.Sequence(
+                RoutinesBT.Items.UseConsumable(FIRE_IMP_STONE_MODEL_ID),
+                _presearing_clear_path(
+                    leveling_coordinate_list,
+                    MONK_AFTER_CIGLO_REWARD_BUILD,
+                    enemy_scan_range=1150.0,
+                    name="MonkLevelingClearPath",
+                ),
+                name="MonkLevelingCombat",
+            ),
+        ),
+        (
+            "Monk: Prince Rurik",
+            lambda: RoutinesBT.Composite.Sequence(
+                _return_to_ascalon("MonkReturnToAscalon"),
+                _move_interact_and_dialog(
+                    taking_quest_coordinate_list,
+                    ((0x802E01, 1500),),
+                    "MonkPrinceRurik",
+                ),
+                name="MonkPrinceRurikStage",
+            ),
+        ),
+    ]
+
+
+_monk_botting_tree: BottingTree | None = None
+
+
+def ensure_monk_botting_tree() -> BottingTree:
+    global _monk_botting_tree
+    if _monk_botting_tree is None:
+        _monk_botting_tree = BottingTree.Create(
+            "LDoA Monk",
+            main_routine=MonkLevelingSteps(),
+            routine_name="MonkLevelingSequence",
+            repeat=False,
+            pause_on_combat=False,
+            multi_account=False,
+            auto_loot=False,
+            isolation_enabled=False,
+        )
+        _monk_botting_tree.SetHeadlessHeroAIEnabled(False)
+        _monk_botting_tree.SetHeroAIStateLogging(False)
+    return _monk_botting_tree
+
+
+def ResetMonkBottingTree() -> None:
+    global _monk_botting_tree
+    if _monk_botting_tree is not None:
+        if _monk_botting_tree.IsStarted():
+            _monk_botting_tree.Stop()
+        else:
+            _monk_botting_tree.Reset()
+    _monk_botting_tree = None
+
+
+def TickMonkBottingTree() -> bool:
+    tree = ensure_monk_botting_tree()
+    if tree.tree.blackboard.get("PLANNER_STATUS") == "PLANNER: Completed":
+        return True
+    if IsBotStarted() and not tree.IsStarted():
+        tree.Start()
+    elif not IsBotStarted() and tree.IsStarted():
+        tree.Stop()
+
+    if tree.IsStarted():
+        tree.tick()
+
+    return tree.tree.blackboard.get("PLANNER_STATUS") == "PLANNER: Completed"
+
+
+def NecromancerLevelingSteps() -> list[tuple[str, Callable[[], BehaviorTree]]]:
+    return [
+        (
+            "Necromancer: Bonus",
+            lambda: _prepare_bonus_equipment(
+                equipment_model_ids=(NECROMANCER_SOUL_SHRIEKER_MODEL_ID,),
+                retained_model_ids=frozenset(
+                    {
+                        NECROMANCER_SOUL_SHRIEKER_MODEL_ID,
+                        FIRE_IMP_STONE_MODEL_ID,
+                    }
+                ),
+                name="NecromancerBonusEquipment",
+            ),
+        ),
+        (
+            "Necromancer: Town Crier",
+            lambda: _move_interact_and_dialog(
+                town_crier_coordinate_list,
+                ((0x805001, 300),),
+                "NecromancerTownCrier",
+            ),
+        ),
+        (
+            "Necromancer: Sir Tydus",
+            lambda: _move_interact_and_dialog(
+                sir_tydus_coordinate_list,
+                ((0x805007, 1500), (0x80DA01, 1500)),
+                "NecromancerSirTydus",
+            ),
+        ),
+        (
+            "Necromancer: Leaving Ascalon",
+            lambda: RoutinesBT.Composite.Sequence(
+                _move_until_explorable(ascalon_coordinate_list, "NecromancerLeaveAscalon"),
+                _wait_for_map_mode(explorable=True, name="NecromancerWaitForExplorable"),
+                BT.Wait(1500),
+                name="NecromancerLeavingAscalon",
+            ),
+        ),
+        (
+            "Necromancer: Verata",
+            lambda: _move_interact_and_dialog(
+                verata_coordinate_list,
+                ((0x80DA07, 1500), (0x805201, 1500)),
+                "NecromancerVerata",
+            ),
+        ),
+        (
+            "Necromancer: Profession Quest Combat",
+            lambda: RoutinesBT.Composite.Sequence(
+                RoutinesBT.Items.UseConsumable(FIRE_IMP_STONE_MODEL_ID),
+                _presearing_clear_path(
+                    necromancer_quest_coordinate_list,
+                    NECROMANCER_AFTER_VERATA_BUILD,
+                    enemy_scan_range=1150.0,
+                    name="NecromancerProfessionQuestClearPath",
+                ),
+                name="NecromancerProfessionQuestCombat",
+            ),
+        ),
+        (
+            "Necromancer: Returning to Ascalon",
+            lambda: _return_to_ascalon("NecromancerFirstReturn"),
+        ),
+        (
+            "Necromancer: Verata Reward and Althea",
+            lambda: RoutinesBT.Composite.Sequence(
+                _move_until_explorable(
+                    ascalon_coordinate_list,
+                    "NecromancerLeaveAscalonAgain",
+                ),
+                _wait_for_map_mode(
+                    explorable=True,
+                    name="NecromancerWaitForExplorableAgain",
+                ),
+                BT.Wait(1500),
+                _move_interact_and_dialog(
+                    verata_coordinate_list,
+                    ((0x805207, 1500),),
+                    "NecromancerVerataReward",
+                ),
+                _move_interact_and_dialog(
+                    althea_coordinate_list,
+                    ((0x804703, 1500), (0x804701, 1500)),
+                    "NecromancerAlthea",
+                ),
+                name="NecromancerVerataRewardAndAlthea",
+            ),
+        ),
+        (
+            "Necromancer: Leveling Combat",
+            lambda: RoutinesBT.Composite.Sequence(
+                RoutinesBT.Items.UseConsumable(FIRE_IMP_STONE_MODEL_ID),
+                _presearing_clear_path(
+                    leveling_coordinate_list,
+                    NECROMANCER_AFTER_VERATA_BUILD,
+                    enemy_scan_range=1150.0,
+                    name="NecromancerLevelingClearPath",
+                ),
+                name="NecromancerLevelingCombat",
+            ),
+        ),
+        (
+            "Necromancer: Prince Rurik",
+            lambda: RoutinesBT.Composite.Sequence(
+                _return_to_ascalon("NecromancerSecondReturn"),
+                _move_interact_and_dialog(
+                    taking_quest_coordinate_list,
+                    ((0x802E01, 1500),),
+                    "NecromancerPrinceRurik",
+                ),
+                name="NecromancerPrinceRurikStage",
+            ),
+        ),
+    ]
+
+
+_necromancer_botting_tree: BottingTree | None = None
+
+
+def ensure_necromancer_botting_tree() -> BottingTree:
+    global _necromancer_botting_tree
+    if _necromancer_botting_tree is None:
+        _necromancer_botting_tree = BottingTree.Create(
+            "LDoA Necromancer",
+            main_routine=NecromancerLevelingSteps(),
+            routine_name="NecromancerLevelingSequence",
+            repeat=False,
+            pause_on_combat=False,
+            multi_account=False,
+            auto_loot=False,
+            isolation_enabled=False,
+        )
+        _necromancer_botting_tree.SetHeadlessHeroAIEnabled(False)
+        _necromancer_botting_tree.SetHeroAIStateLogging(False)
+    return _necromancer_botting_tree
+
+
+def ResetNecromancerBottingTree() -> None:
+    global _necromancer_botting_tree
+    if _necromancer_botting_tree is not None:
+        if _necromancer_botting_tree.IsStarted():
+            _necromancer_botting_tree.Stop()
+        else:
+            _necromancer_botting_tree.Reset()
+    _necromancer_botting_tree = None
+
+
+def TickNecromancerBottingTree() -> bool:
+    tree = ensure_necromancer_botting_tree()
+    if tree.tree.blackboard.get("PLANNER_STATUS") == "PLANNER: Completed":
+        return True
+    if IsBotStarted() and not tree.IsStarted():
+        tree.Start()
+    elif not IsBotStarted() and tree.IsStarted():
+        tree.Stop()
+
+    if tree.IsStarted():
+        tree.tick()
+
+    return tree.tree.blackboard.get("PLANNER_STATUS") == "PLANNER: Completed"
+
+
+def MesmerLevelingSteps() -> list[tuple[str, Callable[[], BehaviorTree]]]:
+    return [
+        (
+            "Mesmer: Bonus",
+            lambda: _prepare_bonus_equipment(
+                equipment_model_ids=(WARRIOR_WAND_MODEL_ID, WARRIOR_SHIELD_MODEL_ID),
+                retained_model_ids=frozenset(
+                    {
+                        WARRIOR_WAND_MODEL_ID,
+                        WARRIOR_SHIELD_MODEL_ID,
+                        FIRE_IMP_STONE_MODEL_ID,
+                    }
+                ),
+                name="MesmerBonusAndEquipment",
+            ),
+        ),
+        (
+            "Mesmer: Town Crier",
+            lambda: _move_interact_and_dialog(
+                town_crier_coordinate_list,
+                ((0x805001, 300),),
+                "MesmerTownCrier",
+            ),
+        ),
+        (
+            "Mesmer: Sir Tydus",
+            lambda: _move_interact_and_dialog(
+                sir_tydus_coordinate_list,
+                ((0x805007, 1500), (0x80D901, 1500)),
+                "MesmerSirTydus",
+            ),
+        ),
+        (
+            "Mesmer: Leaving Ascalon",
+            lambda: RoutinesBT.Composite.Sequence(
+                _move_until_explorable(ascalon_coordinate_list, "MesmerLeaveAscalon"),
+                _wait_for_map_mode(explorable=True, name="MesmerWaitForExplorable"),
+                BT.Wait(1500),
+                name="MesmerLeavingAscalon",
+            ),
+        ),
+        (
+            "Mesmer: Sebedoh",
+            lambda: _move_interact_and_dialog(
+                sebedoh_coordinate_list,
+                ((0x80D907, 300), (0x805101, 300)),
+                "MesmerSebedoh",
+            ),
+        ),
+        (
+            "Mesmer: Profession Quest Combat",
+            lambda: RoutinesBT.Composite.Sequence(
+                RoutinesBT.Items.UseConsumable(FIRE_IMP_STONE_MODEL_ID),
+                _presearing_clear_path(
+                    mesmer_quest_coordinate_list,
+                    MESMER_BEFORE_TEST_REWARD_BUILD,
+                    enemy_scan_range=1150.0,
+                    name="MesmerProfessionQuestClearPath",
+                ),
+                name="MesmerProfessionQuestCombat",
+            ),
+        ),
+        (
+            "Mesmer: Returning to Ascalon",
+            lambda: _return_to_ascalon("MesmerFirstReturn"),
+        ),
+        (
+            "Mesmer: Return to Sebedoh and Althea",
+            lambda: RoutinesBT.Composite.Sequence(
+                _move_until_explorable(
+                    ascalon_coordinate_list,
+                    "MesmerLeaveAscalonAgain",
+                ),
+                _wait_for_map_mode(
+                    explorable=True,
+                    name="MesmerWaitForExplorableAgain",
+                ),
+                BT.Wait(1500),
+                _move_interact_and_dialog(
+                    sebedoh_coordinate_list,
+                    ((0x805107, 300),),
+                    "MesmerReturnToSebedoh",
+                ),
+                _move_interact_and_dialog(
+                    althea_coordinate_list,
+                    ((0x804703, 1500), (0x804701, 1500)),
+                    "MesmerAlthea",
+                ),
+                name="MesmerReturnToSebedohAndAlthea",
+            ),
+        ),
+        (
+            "Mesmer: Leveling Combat",
+            lambda: RoutinesBT.Composite.Sequence(
+                RoutinesBT.Items.UseConsumable(FIRE_IMP_STONE_MODEL_ID),
+                _presearing_clear_path(
+                    leveling_coordinate_list,
+                    MESMER_AFTER_SEBEDOH_REWARD_BUILD,
+                    enemy_scan_range=1150.0,
+                    name="MesmerLevelingClearPath",
+                    loot_when_clear=True,
+                ),
+                name="MesmerLevelingCombat",
+            ),
+        ),
+        (
+            "Mesmer: Prince Rurik",
+            lambda: RoutinesBT.Composite.Sequence(
+                _return_to_ascalon("MesmerSecondReturn"),
+                _move_interact_and_dialog(
+                    taking_quest_coordinate_list,
+                    ((0x802E01, 1500),),
+                    "MesmerPrinceRurik",
+                ),
+                name="MesmerPrinceRurikStage",
+            ),
+        ),
+    ]
+
+
+_mesmer_botting_tree: BottingTree | None = None
+
+
+def ensure_mesmer_botting_tree() -> BottingTree:
+    global _mesmer_botting_tree
+    if _mesmer_botting_tree is None:
+        _mesmer_botting_tree = BottingTree.Create(
+            "LDoA Mesmer",
+            main_routine=MesmerLevelingSteps(),
+            routine_name="MesmerLevelingSequence",
+            repeat=False,
+            pause_on_combat=False,
+            multi_account=False,
+            auto_loot=False,
+            isolation_enabled=False,
+        )
+        _mesmer_botting_tree.SetHeadlessHeroAIEnabled(False)
+        _mesmer_botting_tree.SetHeroAIStateLogging(False)
+    return _mesmer_botting_tree
+
+
+def ResetMesmerBottingTree() -> None:
+    global _mesmer_botting_tree
+    if _mesmer_botting_tree is not None:
+        if _mesmer_botting_tree.IsStarted():
+            _mesmer_botting_tree.Stop()
+        else:
+            _mesmer_botting_tree.Reset()
+    _mesmer_botting_tree = None
+
+
+def TickMesmerBottingTree() -> bool:
+    tree = ensure_mesmer_botting_tree()
+    if tree.tree.blackboard.get("PLANNER_STATUS") == "PLANNER: Completed":
+        return True
+    if IsBotStarted() and not tree.IsStarted():
+        tree.Start()
+    elif not IsBotStarted() and tree.IsStarted():
+        tree.Stop()
+
+    if tree.IsStarted():
+        tree.tick()
+
+    return tree.tree.blackboard.get("PLANNER_STATUS") == "PLANNER: Completed"
+
+
+def ElementalistLevelingSteps() -> list[tuple[str, Callable[[], BehaviorTree]]]:
+    return [
+        (
+            "Elementalist: Bonus",
+            lambda: _prepare_bonus_equipment(
+                equipment_model_ids=(WARRIOR_WAND_MODEL_ID, WARRIOR_SHIELD_MODEL_ID),
+                retained_model_ids=frozenset(
+                    {
+                        WARRIOR_WAND_MODEL_ID,
+                        WARRIOR_SHIELD_MODEL_ID,
+                        FIRE_IMP_STONE_MODEL_ID,
+                    }
+                ),
+                name="ElementalistBonusAndEquipment",
+            ),
+        ),
+        (
+            "Elementalist: Town Crier",
+            lambda: _move_interact_and_dialog(
+                town_crier_coordinate_list,
+                ((0x805001, 300),),
+                "ElementalistTownCrier",
+            ),
+        ),
+        (
+            "Elementalist: Sir Tydus",
+            lambda: _move_interact_and_dialog(
+                sir_tydus_coordinate_list,
+                ((0x805007, 1500), (0x80DB01, 1500)),
+                "ElementalistSirTydus",
+            ),
+        ),
+        (
+            "Elementalist: Leaving Ascalon",
+            lambda: RoutinesBT.Composite.Sequence(
+                _move_until_explorable(
+                    ascalon_coordinate_list,
+                    "ElementalistLeaveAscalon",
+                ),
+                _wait_for_map_mode(
+                    explorable=True,
+                    name="ElementalistWaitForExplorable",
+                ),
+                BT.Wait(1500),
+                name="ElementalistLeavingAscalon",
+            ),
+        ),
+        (
+            "Elementalist: Howland",
+            lambda: _move_interact_and_dialog(
+                howland_coordinate_list,
+                ((0x80DB07, 1500), (0x805301, 300)),
+                "ElementalistHowland",
+            ),
+        ),
+        (
+            "Elementalist: Profession Quest Combat",
+            lambda: RoutinesBT.Composite.Sequence(
+                RoutinesBT.Items.UseConsumable(FIRE_IMP_STONE_MODEL_ID),
+                _presearing_clear_path(
+                    elementalist_quest_coordinate_list,
+                    ELEMENTALIST_AFTER_HOWLAND_BUILD,
+                    enemy_scan_range=1200.0,
+                    name="ElementalistProfessionQuestClearPath",
+                    loot_when_clear=True,
+                ),
+                name="ElementalistProfessionQuestCombat",
+            ),
+        ),
+        (
+            "Elementalist: Shimmering Scale",
+            lambda: _pickup_required_ground_item(
+                SHIMMERING_SCALE_MODEL_ID,
+                "ElementalistShimmeringScale",
+            ),
+        ),
+        (
+            "Elementalist: Returning to Ascalon",
+            lambda: _return_to_ascalon("ElementalistFirstReturn"),
+        ),
+        (
+            "Elementalist: Return to Howland and Althea",
+            lambda: RoutinesBT.Composite.Sequence(
+                _move_until_explorable(
+                    ascalon_coordinate_list,
+                    "ElementalistLeaveAscalonAgain",
+                ),
+                _wait_for_map_mode(
+                    explorable=True,
+                    name="ElementalistWaitForExplorableAgain",
+                ),
+                BT.Wait(1500),
+                _move_interact_and_dialog(
+                    howland_coordinate_list,
+                    ((0x805307, 300),),
+                    "ElementalistReturnToHowland",
+                ),
+                _move_interact_and_dialog(
+                    althea_coordinate_list,
+                    ((0x804703, 1500), (0x804701, 1500)),
+                    "ElementalistAlthea",
+                ),
+                name="ElementalistReturnToHowlandAndAlthea",
+            ),
+        ),
+        (
+            "Elementalist: Leveling Combat",
+            lambda: RoutinesBT.Composite.Sequence(
+                RoutinesBT.Items.UseConsumable(FIRE_IMP_STONE_MODEL_ID),
+                _presearing_clear_path(
+                    leveling_coordinate_list,
+                    ELEMENTALIST_AFTER_HOWLAND_BUILD,
+                    enemy_scan_range=1150.0,
+                    name="ElementalistLevelingClearPath",
+                    loot_when_clear=True,
+                ),
+                name="ElementalistLevelingCombat",
+            ),
+        ),
+        (
+            "Elementalist: Prince Rurik",
+            lambda: RoutinesBT.Composite.Sequence(
+                _return_to_ascalon("ElementalistSecondReturn"),
+                _move_interact_and_dialog(
+                    taking_quest_coordinate_list,
+                    ((0x802E01, 1500),),
+                    "ElementalistPrinceRurik",
+                ),
+                name="ElementalistPrinceRurikStage",
+            ),
+        ),
+    ]
+
+
+_elementalist_botting_tree: BottingTree | None = None
+
+
+def ensure_elementalist_botting_tree() -> BottingTree:
+    global _elementalist_botting_tree
+    if _elementalist_botting_tree is None:
+        _elementalist_botting_tree = BottingTree.Create(
+            "LDoA Elementalist",
+            main_routine=ElementalistLevelingSteps(),
+            routine_name="ElementalistLevelingSequence",
+            repeat=False,
+            pause_on_combat=False,
+            multi_account=False,
+            auto_loot=False,
+            isolation_enabled=False,
+        )
+        _elementalist_botting_tree.SetHeadlessHeroAIEnabled(False)
+        _elementalist_botting_tree.SetHeroAIStateLogging(False)
+    return _elementalist_botting_tree
+
+
+def ResetElementalistBottingTree() -> None:
+    global _elementalist_botting_tree
+    if _elementalist_botting_tree is not None:
+        if _elementalist_botting_tree.IsStarted():
+            _elementalist_botting_tree.Stop()
+        else:
+            _elementalist_botting_tree.Reset()
+    _elementalist_botting_tree = None
+
+
+def TickElementalistBottingTree() -> bool:
+    tree = ensure_elementalist_botting_tree()
+    if tree.tree.blackboard.get("PLANNER_STATUS") == "PLANNER: Completed":
+        return True
+    if IsBotStarted() and not tree.IsStarted():
+        tree.Start()
+    elif not IsBotStarted() and tree.IsStarted():
+        tree.Stop()
+
+    if tree.IsStarted():
+        tree.tick()
+
+    return tree.tree.blackboard.get("PLANNER_STATUS") == "PLANNER: Completed"
+
 #FUNCTIONS
 def StartBot():
     global bot_vars, start_time
@@ -408,37 +1726,23 @@ def ResetEnvironment():
     FSM_vars.ascalon_pathing.reset()
     FSM_vars.ascalon_pathing_1.reset()
 
-    #WARRIOR LVL 1 (ported to the in-place BottingTree pilot, see ensure_warrior_botting_tree())
+    #WARRIOR LVL 1
+    ResetWarriorBottingTree()
 
     #RANGER LVL 1
-    FSM_vars.state_machine_ranger.reset()
-    FSM_vars.artemis_pathing.reset()
-    FSM_vars.artemis_pathing_1.reset()
-    FSM_vars.ranger_quest_pathing.reset()
+    ResetRangerBottingTree()
 
     #MONK LVL 1
-    FSM_vars.state_machine_monk.reset()
-    FSM_vars.ciglo_pathing.reset()
-    FSM_vars.monk_quest_pathing_1.reset()
-    FSM_vars.monk_quest_pathing_2.reset()
+    ResetMonkBottingTree()
 
     #NECROMANCER LVL 1
-    FSM_vars.state_machine_necromancer.reset()
-    FSM_vars.verata_pathing.reset()
-    FSM_vars.verata_pathing_1.reset()
-    FSM_vars.necromancer_quest_pathing.reset()
+    ResetNecromancerBottingTree()
 
     #MESMER LVL 1
-    FSM_vars.state_machine_mesmer.reset()
-    FSM_vars.sebedoh_pathing.reset()
-    FSM_vars.sebedoh_pathing_1.reset()
-    FSM_vars.mesmer_quest_pathing.reset()
+    ResetMesmerBottingTree()
 
     #ELEMENTALIST LVL 1
-    FSM_vars.state_machine_elementalist.reset()
-    FSM_vars.howland_pathing.reset()
-    FSM_vars.howland_pathing_1.reset()
-    FSM_vars.elementalist_quest_pathing.reset()
+    ResetElementalistBottingTree()
 
     #DULL CARAPACES
     FSM_vars.state_machine_dull_carapaces.reset()
@@ -763,29 +2067,6 @@ def get_called_target():
                 return player.called_target_id
     return 0
 
-def GetAbsoluteEnergy():
-    my_id = Player.GetAgentID()
-    max_energy = Agent.GetMaxEnergy(my_id) 
-    current_energy = Agent.GetEnergy(my_id) * max_energy  
-    return current_energy
-
-def IsSkillReady2(slot):
-    skill_id = SkillBar.GetSkillIDBySlot(slot)
-
-    if not skill_id or skill_id == 0:
-        return False  
-
-    recharge_time = Skill.Data.GetRecharge(skill_id) or 0
-    if recharge_time > 0:
-        return False 
-
-    energy_cost = Skill.Data.GetEnergyCost(skill_id) or 0
-    if GetAbsoluteEnergy() < energy_cost:
-        return False  
-
-    return True  
-
-
 #STANDARD
 def handle_map_path(map_pathing):
     global FSM_vars
@@ -1019,108 +2300,6 @@ def handle_map_path_Red_Iris_Flower(map_pathing):
 
             return 
 
-#FOR WARRIOR LVL 1
-def warrior_handle_map_path(map_pathing):
-    global FSM_vars
-    my_id = Player.GetAgentID()
-    my_x, my_y = Agent.GetXY(my_id)
-    my_p_prof, my_s_prof = Agent.GetProfessionIDs(my_id)
-    current_time = time.time()
-
-    enemy_array = AgentArray.GetEnemyArray()
-    enemy_array = AgentArray.Filter.ByDistance(enemy_array, (my_x, my_y), 1200)
-    enemy_array = AgentArray.Filter.ByAttribute(enemy_array, 'IsAlive')
-    enemy_array = AgentArray.Sort.ByDistance(enemy_array, (my_x, my_y))
-
-    if not enemy_array:
-        FSM_vars.current_target_id = None
-        FSM_vars.last_target_id = None
-        FSM_vars.has_interacted = False 
-        Routines.Movement.FollowPath(map_pathing, FSM_vars.movement_handler)  
-        return
-
-    if FSM_vars.current_target_id is None or not Agent.IsAlive(FSM_vars.current_target_id) or not FSM_vars.current_target_id == FSM_vars.last_target_id:
-        FSM_vars.current_target_id = enemy_array[0]  
-        FSM_vars.has_interacted = False  
-
-    if FSM_vars.current_target_id:
-        target_id = FSM_vars.current_target_id
-        target_x, target_y = Agent.GetXY(target_id)
-        distance_to_target = ((my_x - target_x) ** 2 + (my_y - target_y) ** 2) ** 0.5
-
-        if not FSM_vars.has_interacted:
-            if my_p_prof == Profession.Ranger.value or my_s_prof == Profession.Ranger.value:
-                Party.Pets.SetPetBehavior(0, target_id)
-            Player.Interact(target_id, call_target=False)
-            FSM_vars.last_target_id = target_id
-            FSM_vars.has_interacted = True  
-        
-        if Agent.IsAlive(target_id):
-            if current_time - FSM_vars.last_skill_time >= 2.0:
-                skill_slot = FSM_vars.current_skill_index
-                Player.ChangeTarget(target_id)
-                Player.Interact(target_id, call_target=False)                 
-                SkillBar.UseSkill(skill_slot)  
-                FSM_vars.last_skill_time = current_time  
-
-                FSM_vars.current_skill_index = 2 if skill_slot >= 8 else skill_slot + 1  
-
-            return
-
-
-#FOR MESMER LVL 1
-def mesmer_handle_map_path(map_pathing):
-
-    global FSM_vars
-    my_id = Player.GetAgentID()
-    my_x, my_y = Agent.GetXY(my_id)
-    my_p_prof, my_s_prof = Agent.GetProfessionIDs(my_id)
-    current_time = time.time()
-
-    enemy_array = AgentArray.GetEnemyArray()
-    enemy_array = AgentArray.Filter.ByDistance(enemy_array, (my_x, my_y), 1200)
-    enemy_array = AgentArray.Filter.ByAttribute(enemy_array, 'IsAlive')
-    enemy_array = AgentArray.Sort.ByDistance(enemy_array, (my_x, my_y))
-
-    if not enemy_array:
-        FSM_vars.current_target_id = None
-        FSM_vars.last_target_id = None
-        FSM_vars.has_interacted = False 
-        Routines.Movement.FollowPath(map_pathing, FSM_vars.movement_handler)  
-        return
-
-    if FSM_vars.current_target_id is None or not Agent.IsAlive(FSM_vars.current_target_id) or not FSM_vars.current_target_id == FSM_vars.last_target_id:
-        FSM_vars.current_target_id = enemy_array[0]  
-        FSM_vars.has_interacted = False  
-
-    if FSM_vars.current_target_id:
-        target_id = FSM_vars.current_target_id
-        target_x, target_y = Agent.GetXY(target_id)
-        distance_to_target = ((my_x - target_x) ** 2 + (my_y - target_y) ** 2) ** 0.5
-
-        if not FSM_vars.has_interacted:
-            if my_p_prof == Profession.Ranger.value or my_s_prof == Profession.Ranger.value:
-                Party.Pets.SetPetBehavior(0, target_id)
-            Player.Interact(target_id, call_target=False)
-            FSM_vars.last_target_id = target_id
-            FSM_vars.has_interacted = True  
-        
-        if Agent.IsAlive(target_id):
-            if current_time - FSM_vars.last_skill_time >= 2.0:
-                skill_slot = FSM_vars.current_skill_index
-                Player.ChangeTarget(target_id)
-                Player.Interact(target_id, call_target=False)                 
-                SkillBar.UseSkill(skill_slot)  
-                FSM_vars.last_skill_time = current_time  
-
-                FSM_vars.current_skill_index = 1 if skill_slot >= 3 else skill_slot + 1  
-
-            return  
-    else:
-        Party.Pets.SetPetBehavior(1, my_id)
-        Routines.Movement.FollowPath(map_pathing, FSM_vars.movement_handler)
-
-
 #FOR EVERYONE LVL 1
 def early_handle_map_path(map_pathing):
     global FSM_vars
@@ -1265,33 +2444,6 @@ def handle_npc_interaction():
         Player.Interact(target_id, call_target=False)
         FSM_vars.has_interacted = True
         FSM_vars.last_interaction_time = current_time  
-
-def handle_item_interaction():
-    global FSM_vars
-    my_id = Player.GetAgentID()
-    my_x, my_y = Agent.GetXY(my_id)
-    current_time = time.time()
-
-    item_array = AgentArray.GetItemArray()
-    item_array = AgentArray.Filter.ByDistance(item_array, (my_x, my_y), 1200)
-
-    if not item_array:
-        FSM_vars.current_target_id = None
-        FSM_vars.has_interacted = False
-        FSM_vars.last_interaction_time = 0  
-        return  
-
-    item_array = AgentArray.Sort.ByDistance(item_array, (my_x, my_y))
-
-    if FSM_vars.current_target_id is None or FSM_vars.current_target_id not in item_array:
-        FSM_vars.current_target_id = None  
-        FSM_vars.has_interacted = False  
-
-    for target_id in item_array:
-        if current_time - FSM_vars.last_interaction_time >= 6:
-            Player.Interact(target_id, call_target=False)
-            FSM_vars.last_interaction_time = current_time   
-            FSM_vars.has_interacted = True  
 
 def handle_quest_interaction():
     global FSM_vars
@@ -1780,37 +2932,17 @@ class StateMachineVars:
         self.leveling_pathing = Routines.Movement.PathHandler(leveling_coordinate_list)
         self.taking_quest_pathing = Routines.Movement.PathHandler(taking_quest_coordinate_list)
 
-        #FSM for WARRIOR lvl 1 (ported to the in-place BottingTree pilot, see ensure_warrior_botting_tree())
+        # Level 1 Warrior is owned by the BottingTree route.
 
-        #FSM for RANGER lvl 1
-        self.state_machine_ranger = FSM("RANGER")
-        self.artemis_pathing = Routines.Movement.PathHandler(artemis_coordinate_list)
-        self.artemis_pathing_1 = Routines.Movement.PathHandler(artemis_coordinate_list)
-        self.ranger_quest_pathing = Routines.Movement.PathHandler(ranger_quest_coordinate_list)
+        # Level 1 Ranger is owned by the BottingTree route.
 
-        #FSM for MONK lvl 1
-        self.state_machine_monk = FSM("MONK")
-        self.ciglo_pathing = Routines.Movement.PathHandler(ciglo_coordinate_list)
-        self.monk_quest_pathing_1 = Routines.Movement.PathHandler(monk_quest_coordinate_list_1)
-        self.monk_quest_pathing_2 = Routines.Movement.PathHandler(monk_quest_coordinate_list_2)
+        # Level 1 Monk is owned by the BottingTree route.
 
-        #FSM for NECROMANCER lvl 1
-        self.state_machine_necromancer = FSM("NECROMANCER")
-        self.verata_pathing = Routines.Movement.PathHandler(verata_coordinate_list)
-        self.verata_pathing_1 = Routines.Movement.PathHandler(verata_coordinate_list)
-        self.necromancer_quest_pathing = Routines.Movement.PathHandler(necromancer_quest_coordinate_list)
+        # Level 1 Necromancer is owned by the BottingTree route.
 
-        #FSM for MESMER lvl 1
-        self.state_machine_mesmer = FSM("MESMER")
-        self.sebedoh_pathing = Routines.Movement.PathHandler(sebedoh_coordinate_list)
-        self.sebedoh_pathing_1 = Routines.Movement.PathHandler(sebedoh_coordinate_list)
-        self.mesmer_quest_pathing = Routines.Movement.PathHandler(mesmer_quest_coordinate_list)
+        # Level 1 Mesmer is owned by the BottingTree route.
         
-        #FSM for MESMER lvl 1
-        self.state_machine_elementalist = FSM("ELEMENTALIST")
-        self.howland_pathing = Routines.Movement.PathHandler(howland_coordinate_list)
-        self.howland_pathing_1 = Routines.Movement.PathHandler(howland_coordinate_list)
-        self.elementalist_quest_pathing = Routines.Movement.PathHandler(elementalist_quest_coordinate_list)
+        # Level 1 Elementalist is owned by the BottingTree route.
 
         #FSM for lvl 2-10
         self.state_machine_lvl2_10 = FSM("LEVEL 2-10")
@@ -1972,231 +3104,11 @@ class StateMachineVars:
 FSM_vars = StateMachineVars()
 
 #region Warrior
-# Ported in-place to a BottingTree pilot -- see ensure_warrior_botting_tree()
-# and WarriorLevelingSteps() near the top of this file.
-
-#region Ranger
-#___________________________ RANGER LVL 1 ___________________________#
-#START COMMON ROUTINE PART ONE
-FSM_vars.state_machine_ranger.AddState(name="COMMAND BONUS", execute_fn=lambda: Player.SendChatCommand(text_bonus), exit_condition=lambda: LDoA_IsOutpost(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="EQUIP BOW", execute_fn=lambda: equipitem(5831, agent_id), exit_condition=lambda: LDoA_IsOutpost(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="EQUIP SHIELD", execute_fn=lambda: equipitem(6514, agent_id), exit_condition=lambda: LDoA_IsOutpost(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="GOING NEAR TOWN CRIER", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.town_crier_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.town_crier_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_ranger.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="TAKING QUEST", execute_fn=lambda: Player.SendDialog(int("0x805001", 16)), transition_delay_ms=300, run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="GOING NEAR SIR TYDUS", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.sir_tydus_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.sir_tydus_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_ranger.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="TAKING REWARD", execute_fn=lambda: Player.SendDialog(int("0x805007", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="TAKING REWARD", execute_fn=lambda: Player.SendDialog(int("0x80DE01", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="GOING OUT ASCALON", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.ascalon_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.ascalon_pathing, FSM_vars.movement_handler) or (Map.IsMapReady() and Map.IsExplorable() and Party.IsPartyLoaded()), run_once=False)
-FSM_vars.state_machine_ranger.AddState(name="WAITING EXPLORABLE MAP", exit_condition=lambda: Map.IsMapReady() and Map.IsExplorable() and Party.IsPartyLoaded(), transition_delay_ms=1500, run_once=True)
-#END COMMON ROUTINE PART ONE
-#START RANGER ROUTINE
-FSM_vars.state_machine_ranger.AddState(name="GOING NEAR ARTEMIS", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.artemis_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.artemis_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_ranger.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="TAKING REWARD", execute_fn=lambda: Player.SendDialog(int("0x80DE07", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="TAKING REWARD", execute_fn=lambda: Player.SendDialog(int("0x805601", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="USING IMP STONE", execute_fn=lambda: useitem(30847), run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="GOING TO KILL", execute_fn=lambda: handle_map_path(FSM_vars.ranger_quest_pathing), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.ranger_quest_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_ranger.AddState(name="GOING BACK TO ASCALON", execute_fn=lambda: LDoA_TravelToOutpost(bot_vars.ascalon_map), exit_condition=lambda: Map.IsMapReady() and LDoA_IsOutpost() and Party.IsPartyLoaded(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="WAITING OUTPOST MAP", exit_condition=lambda: Map.IsMapReady() and LDoA_IsOutpost() and Party.IsPartyLoaded(), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="GOING OUT ASCALON", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.ascalon_pathing_1, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.ascalon_pathing_1, FSM_vars.movement_handler) or (Map.IsMapReady() and Map.IsExplorable() and Party.IsPartyLoaded()), run_once=False)
-FSM_vars.state_machine_ranger.AddState(name="WAITING EXPLORABLE MAP", exit_condition=lambda: Map.IsMapReady() and Map.IsExplorable() and Party.IsPartyLoaded(), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="GOING NEAR VAN", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.artemis_pathing_1, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.artemis_pathing_1, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_ranger.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="TAKING REWARD", execute_fn=lambda: Player.SendDialog(int("0x805607", 16)), transition_delay_ms=1500, run_once=True)
-#END RANGER ROUTINE
-#START COMMON ROUTINE PART TWO
-FSM_vars.state_machine_ranger.AddState(name="GOING NEAR ALTHEA", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.althea_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.althea_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_ranger.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="TAKING QUEST", execute_fn=lambda: Player.SendDialog(int("0x804703", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="TAKING SKILLS", execute_fn=lambda: Player.SendDialog(int("0x804701", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="USING IMP STONE", execute_fn=lambda: useitem(30847), run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="SECOND MAP PATH", execute_fn=lambda: hamnet_handle_map_path(FSM_vars.leveling_pathing), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.leveling_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_ranger.AddState(name="GOING BACK TO ASCALON", execute_fn=lambda: LDoA_TravelToOutpost(bot_vars.ascalon_map), exit_condition=lambda: Map.IsMapReady() and LDoA_IsOutpost() and Party.IsPartyLoaded(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="WAITING OUTPOST MAP", exit_condition=lambda: Map.IsMapReady() and LDoA_IsOutpost() and Party.IsPartyLoaded(), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="GOING NEAR PRINCE RURIK", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.taking_quest_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.taking_quest_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_ranger.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="TAKING QUEST", execute_fn=lambda: Player.SendDialog(int("0x802E01", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_ranger.AddState(name="EQUIP WAND", execute_fn=lambda: equipitem(6508, agent_id), exit_condition=lambda: LDoA_IsOutpost(), transition_delay_ms=1000, run_once=True)
-#END COMMON ROUTINE PART TWO
-
-#region Monk
-#___________________________ MONK LVL 1 ___________________________#
-#START COMMON ROUTINE PART ONE
-FSM_vars.state_machine_monk.AddState(name="COMMAND BONUS", execute_fn=lambda: Player.SendChatCommand(text_bonus), exit_condition=lambda: LDoA_IsOutpost(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_monk.AddState(name="EQUIP WAND", execute_fn=lambda: equipitem(6508, agent_id), exit_condition=lambda: LDoA_IsOutpost(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_monk.AddState(name="EQUIP SHIELD", execute_fn=lambda: equipitem(6514, agent_id), exit_condition=lambda: LDoA_IsOutpost(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_monk.AddState(name="GOING NEAR TOWN CRIER", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.town_crier_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.town_crier_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_monk.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_monk.AddState(name="TAKING QUEST", execute_fn=lambda: Player.SendDialog(int("0x805001", 16)), transition_delay_ms=300, run_once=True)
-FSM_vars.state_machine_monk.AddState(name="GOING NEAR SIR TYDUS", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.sir_tydus_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.sir_tydus_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_monk.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_monk.AddState(name="TAKING REWARD", execute_fn=lambda: Player.SendDialog(int("0x805007", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_monk.AddState(name="TAKING REWARD", execute_fn=lambda: Player.SendDialog(int("0x80DC01", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_monk.AddState(name="GOING OUT ASCALON", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.ascalon_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.ascalon_pathing, FSM_vars.movement_handler) or (Map.IsMapReady() and Map.IsExplorable() and Party.IsPartyLoaded()), run_once=False)
-FSM_vars.state_machine_monk.AddState(name="WAITING EXPLORABLE MAP", exit_condition=lambda: Map.IsMapReady() and Map.IsExplorable() and Party.IsPartyLoaded(), transition_delay_ms=1500, run_once=True)
-#END COMMON ROUTINE PART ONE
-#START MONK ROUTINE
-FSM_vars.state_machine_monk.AddState(name="GOING NEAR CIGLO", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.ciglo_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.ciglo_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_monk.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_monk.AddState(name="TAKING REWARD", execute_fn=lambda: Player.SendDialog(int("0x80DC07", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_monk.AddState(name="TAKING REWARD", execute_fn=lambda: Player.SendDialog(int("0x805401", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_monk.AddState(name="GOING TO GWEN", execute_fn=lambda: handle_map_path(FSM_vars.monk_quest_pathing_1), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.monk_quest_pathing_1, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_monk.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_monk.AddState(name="GOING BACK TO CIGLO", execute_fn=lambda: handle_map_path(FSM_vars.monk_quest_pathing_2), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.monk_quest_pathing_2, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_monk.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_monk.AddState(name="TAKING REWARD", execute_fn=lambda: Player.SendDialog(int("0x805407", 16)), transition_delay_ms=1500, run_once=True)
-#END MONK ROUTINE
-#START COMMON ROUTINE PART TWO
-FSM_vars.state_machine_monk.AddState(name="GOING NEAR ALTHEA", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.althea_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.althea_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_monk.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_monk.AddState(name="TAKING QUEST", execute_fn=lambda: Player.SendDialog(int("0x804703", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_monk.AddState(name="TAKING SKILLS", execute_fn=lambda: Player.SendDialog(int("0x804701", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_monk.AddState(name="USING IMP STONE", execute_fn=lambda: useitem(30847), run_once=True)
-FSM_vars.state_machine_monk.AddState(name="SECOND MAP PATH", execute_fn=lambda: early_handle_map_path(FSM_vars.leveling_pathing), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.leveling_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_monk.AddState(name="GOING BACK TO ASCALON", execute_fn=lambda: LDoA_TravelToOutpost(bot_vars.ascalon_map), exit_condition=lambda: Map.IsMapReady() and LDoA_IsOutpost() and Party.IsPartyLoaded(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_monk.AddState(name="WAITING OUTPOST MAP", exit_condition=lambda: Map.IsMapReady() and LDoA_IsOutpost() and Party.IsPartyLoaded(), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_monk.AddState(name="GOING NEAR PRINCE RURIK", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.taking_quest_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.taking_quest_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_monk.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_monk.AddState(name="TAKING QUEST", execute_fn=lambda: Player.SendDialog(int("0x802E01", 16)), transition_delay_ms=1500, run_once=True)
-#END COMMON ROUTINE PART TWO
-
-#region Necromancer
-#___________________________ NECROMANCER LVL 1 ___________________________#
-#START COMMON ROUTINE PART ONE
-FSM_vars.state_machine_necromancer.AddState(name="COMMAND BONUS", execute_fn=lambda: Player.SendChatCommand(text_bonus), exit_condition=lambda: LDoA_IsOutpost(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="EQUIP WAND", execute_fn=lambda: equipitem(6508, agent_id), exit_condition=lambda: LDoA_IsOutpost(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="EQUIP SHIELD", execute_fn=lambda: equipitem(6514, agent_id), exit_condition=lambda: LDoA_IsOutpost(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="GOING NEAR TOWN CRIER", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.town_crier_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.town_crier_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_necromancer.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="TAKING QUEST", execute_fn=lambda: Player.SendDialog(int("0x805001", 16)), transition_delay_ms=300, run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="GOING NEAR SIR TYDUS", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.sir_tydus_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.sir_tydus_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_necromancer.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="TAKING REWARD", execute_fn=lambda: Player.SendDialog(int("0x805007", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="TAKING REWARD", execute_fn=lambda: Player.SendDialog(int("0x80DA01", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="GOING OUT ASCALON", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.ascalon_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.ascalon_pathing, FSM_vars.movement_handler) or (Map.IsMapReady() and Map.IsExplorable() and Party.IsPartyLoaded()), run_once=False)
-FSM_vars.state_machine_necromancer.AddState(name="WAITING EXPLORABLE MAP", exit_condition=lambda: Map.IsMapReady() and Map.IsExplorable() and Party.IsPartyLoaded(), transition_delay_ms=1500, run_once=True)
-#END COMMON ROUTINE PART ONE
-#START NECROMANCER ROUTINE
-FSM_vars.state_machine_necromancer.AddState(name="GOING NEAR ARTEMIS", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.verata_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.verata_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_necromancer.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="TAKING REWARD", execute_fn=lambda: Player.SendDialog(int("0x80DA07", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="TAKING QUEST", execute_fn=lambda: Player.SendDialog(int("0x805201", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="USING IMP STONE", execute_fn=lambda: useitem(30847), run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="GOING TO KILL", execute_fn=lambda: handle_map_path(FSM_vars.necromancer_quest_pathing), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.necromancer_quest_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_necromancer.AddState(name="GOING BACK TO ASCALON", execute_fn=lambda: LDoA_TravelToOutpost(bot_vars.ascalon_map), exit_condition=lambda: Map.IsMapReady() and LDoA_IsOutpost() and Party.IsPartyLoaded(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="WAITING OUTPOST MAP", exit_condition=lambda: Map.IsMapReady() and LDoA_IsOutpost() and Party.IsPartyLoaded(), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="GOING OUT ASCALON", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.ascalon_pathing_1, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.ascalon_pathing_1, FSM_vars.movement_handler) or (Map.IsMapReady() and Map.IsExplorable() and Party.IsPartyLoaded()), run_once=False)
-FSM_vars.state_machine_necromancer.AddState(name="WAITING EXPLORABLE MAP", exit_condition=lambda: Map.IsMapReady() and Map.IsExplorable() and Party.IsPartyLoaded(), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="GOING NEAR VAN", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.verata_pathing_1, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.verata_pathing_1, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_necromancer.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="TAKING QUEST", execute_fn=lambda: Player.SendDialog(int("0x805207", 16)), transition_delay_ms=1500, run_once=True)
-#END NECROMANCER ROUTINE
-#START COMMON ROUTINE PART TWO
-FSM_vars.state_machine_necromancer.AddState(name="GOING NEAR ALTHEA", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.althea_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.althea_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_necromancer.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="TAKING QUEST", execute_fn=lambda: Player.SendDialog(int("0x804703", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="TAKING SKILLS", execute_fn=lambda: Player.SendDialog(int("0x804701", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="USING IMP STONE", execute_fn=lambda: useitem(30847), run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="SECOND MAP PATH", execute_fn=lambda: early_handle_map_path(FSM_vars.leveling_pathing), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.leveling_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_necromancer.AddState(name="GOING BACK TO ASCALON", execute_fn=lambda: LDoA_TravelToOutpost(bot_vars.ascalon_map), exit_condition=lambda: Map.IsMapReady() and LDoA_IsOutpost() and Party.IsPartyLoaded(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="WAITING OUTPOST MAP", exit_condition=lambda: Map.IsMapReady() and LDoA_IsOutpost() and Party.IsPartyLoaded(), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="GOING NEAR PRINCE RURIK", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.taking_quest_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.taking_quest_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_necromancer.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_necromancer.AddState(name="TAKING QUEST", execute_fn=lambda: Player.SendDialog(int("0x802E01", 16)), transition_delay_ms=1500, run_once=True)
-#END COMMON ROUTINE PART TW0
-
-#region Mesmer
-#___________________________ MESMER LVL 1 ___________________________#
-#START COMMON ROUTINE PART ONE
-FSM_vars.state_machine_mesmer.AddState(name="COMMAND BONUS", execute_fn=lambda: Player.SendChatCommand(text_bonus), exit_condition=lambda: LDoA_IsOutpost(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="EQUIP WAND", execute_fn=lambda: equipitem(6508, agent_id), exit_condition=lambda: LDoA_IsOutpost(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="EQUIP SHIELD", execute_fn=lambda: equipitem(6514, agent_id), exit_condition=lambda: LDoA_IsOutpost(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="GOING NEAR TOWN CRIER", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.town_crier_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.town_crier_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_mesmer.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="TAKING QUEST", execute_fn=lambda: Player.SendDialog(int("0x805001", 16)), transition_delay_ms=300, run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="GOING NEAR SIR TYDUS", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.sir_tydus_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.sir_tydus_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_mesmer.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="TAKING REWARD", execute_fn=lambda: Player.SendDialog(int("0x805007", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="TAKING REWARD", execute_fn=lambda: Player.SendDialog(int("0x80D901", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="GOING OUT ASCALON", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.ascalon_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.ascalon_pathing, FSM_vars.movement_handler) or (Map.IsMapReady() and Map.IsExplorable() and Party.IsPartyLoaded()), run_once=False)
-FSM_vars.state_machine_mesmer.AddState(name="WAITING EXPLORABLE MAP", exit_condition=lambda: Map.IsMapReady() and Map.IsExplorable() and Party.IsPartyLoaded(), transition_delay_ms=1500, run_once=True)
-#END COMMON ROUTINE PART ONE
-#START MESMER ROUTINE
-FSM_vars.state_machine_mesmer.AddState(name="GOING NEAR SEBEDOH", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.sebedoh_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.sebedoh_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_mesmer.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="TAKING REWARD", execute_fn=lambda: Player.SendDialog(int("0x80D907", 16)), transition_delay_ms=300, run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="TAKING QUEST", execute_fn=lambda: Player.SendDialog(int("0x805101", 16)), transition_delay_ms=300, run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="USING IMP STONE", execute_fn=lambda: useitem(30847), run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="GOING TO KILL", execute_fn=lambda: handle_map_path(FSM_vars.mesmer_quest_pathing), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.mesmer_quest_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_mesmer.AddState(name="GOING BACK TO ASCALON", execute_fn=lambda: LDoA_TravelToOutpost(bot_vars.ascalon_map), exit_condition=lambda: Map.IsMapReady() and LDoA_IsOutpost() and Party.IsPartyLoaded(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="WAITING OUTPOST MAP", exit_condition=lambda: Map.IsMapReady() and LDoA_IsOutpost() and Party.IsPartyLoaded(), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="GOING OUT ASCALON", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.ascalon_pathing_1, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.ascalon_pathing_1, FSM_vars.movement_handler) or (Map.IsMapReady() and Map.IsExplorable() and Party.IsPartyLoaded()), run_once=False)
-FSM_vars.state_machine_mesmer.AddState(name="WAITING EXPLORABLE MAP", exit_condition=lambda: Map.IsMapReady() and Map.IsExplorable() and Party.IsPartyLoaded(), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="GOING NEAR VAN", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.sebedoh_pathing_1, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.sebedoh_pathing_1, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_mesmer.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="TAKING REWARD", execute_fn=lambda: Player.SendDialog(int("0x805107", 16)), transition_delay_ms=300, run_once=True)
-#END MESMER ROUTINE
-#START COMMON ROUTINE PART TWO
-FSM_vars.state_machine_mesmer.AddState(name="GOING NEAR ALTHEA", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.althea_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.althea_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_mesmer.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="TAKING QUEST", execute_fn=lambda: Player.SendDialog(int("0x804703", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="TAKING SKILLS", execute_fn=lambda: Player.SendDialog(int("0x804701", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="USING IMP STONE", execute_fn=lambda: useitem(30847), run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="SECOND MAP PATH", execute_fn=lambda: early_handle_map_path(FSM_vars.leveling_pathing), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.leveling_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_mesmer.AddState(name="GOING BACK TO ASCALON", execute_fn=lambda: LDoA_TravelToOutpost(bot_vars.ascalon_map), exit_condition=lambda: Map.IsMapReady() and LDoA_IsOutpost() and Party.IsPartyLoaded(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="WAITING OUTPOST MAP", exit_condition=lambda: Map.IsMapReady() and LDoA_IsOutpost() and Party.IsPartyLoaded(), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="GOING NEAR PRINCE RURIK", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.taking_quest_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.taking_quest_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_mesmer.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_mesmer.AddState(name="TAKING QUEST", execute_fn=lambda: Player.SendDialog(int("0x802E01", 16)), transition_delay_ms=1500, run_once=True)
-#END COMMON ROUTINE PART TWO
-
-#region Elementalist
-#___________________________ ELEMENTALIST LVL 1 ___________________________#
-#START COMMON ROUTINE PART ONE
-FSM_vars.state_machine_elementalist.AddState(name="COMMAND BONUS", execute_fn=lambda: Player.SendChatCommand(text_bonus), exit_condition=lambda: LDoA_IsOutpost(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="EQUIP WAND", execute_fn=lambda: equipitem(6508, agent_id), exit_condition=lambda: LDoA_IsOutpost(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="EQUIP SHIELD", execute_fn=lambda: equipitem(6514, agent_id), exit_condition=lambda: LDoA_IsOutpost(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="GOING NEAR TOWN CRIER", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.town_crier_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.town_crier_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_elementalist.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="TAKING QUEST", execute_fn=lambda: Player.SendDialog(int("0x805001", 16)), transition_delay_ms=300, run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="GOING NEAR SIR TYDUS", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.sir_tydus_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.sir_tydus_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_elementalist.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="TAKING REWARD", execute_fn=lambda: Player.SendDialog(int("0x805007", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="TAKING REWARD", execute_fn=lambda: Player.SendDialog(int("0x80DB01", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="GOING OUT ASCALON", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.ascalon_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.ascalon_pathing, FSM_vars.movement_handler) or (Map.IsMapReady() and Map.IsExplorable() and Party.IsPartyLoaded()), run_once=False)
-FSM_vars.state_machine_elementalist.AddState(name="WAITING EXPLORABLE MAP", exit_condition=lambda: Map.IsMapReady() and Map.IsExplorable() and Party.IsPartyLoaded(), transition_delay_ms=1500, run_once=True)
-#END COMMON ROUTINE PART ONE
-#START ELEMENTALIST ROUTINE
-FSM_vars.state_machine_elementalist.AddState(name="GOING NEAR SEBEDOH", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.howland_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.howland_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_elementalist.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="TAKING REWARD", execute_fn=lambda: Player.SendDialog(int("0x80DB07", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="TAKING QUEST", execute_fn=lambda: Player.SendDialog(int("0x805301", 16)), transition_delay_ms=300, run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="USING IMP STONE", execute_fn=lambda: useitem(30847), run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="GOING TO KILL", execute_fn=lambda: handle_map_path_loot(FSM_vars.elementalist_quest_pathing), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.elementalist_quest_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_elementalist.AddState(name="CHECK ITEM", execute_fn=lambda: handle_item_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="GOING BACK TO ASCALON", execute_fn=lambda: LDoA_TravelToOutpost(bot_vars.ascalon_map), exit_condition=lambda: Map.IsMapReady() and LDoA_IsOutpost() and Party.IsPartyLoaded(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="WAITING OUTPOST MAP", exit_condition=lambda: Map.IsMapReady() and LDoA_IsOutpost() and Party.IsPartyLoaded(), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="GOING OUT ASCALON", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.ascalon_pathing_1, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.ascalon_pathing_1, FSM_vars.movement_handler) or (Map.IsMapReady() and Map.IsExplorable() and Party.IsPartyLoaded()), run_once=False)
-FSM_vars.state_machine_elementalist.AddState(name="WAITING EXPLORABLE MAP", exit_condition=lambda: Map.IsMapReady() and Map.IsExplorable() and Party.IsPartyLoaded(), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="GOING NEAR HOWLAND", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.howland_pathing_1, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.howland_pathing_1, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_elementalist.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="TAKING QUEST", execute_fn=lambda: Player.SendDialog(int("0x805307", 16)), transition_delay_ms=300, run_once=True)
-#END ELEMENTALIST ROUTINE
-#START COMMON ROUTINE PART TWO
-FSM_vars.state_machine_elementalist.AddState(name="GOING NEAR ALTHEA", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.althea_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.althea_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_elementalist.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="TAKING QUEST", execute_fn=lambda: Player.SendDialog(int("0x804703", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="TAKING SKILLS", execute_fn=lambda: Player.SendDialog(int("0x804701", 16)), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="USING IMP STONE", execute_fn=lambda: useitem(30847), run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="SECOND MAP PATH", execute_fn=lambda: early_handle_map_path(FSM_vars.leveling_pathing), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.leveling_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_elementalist.AddState(name="GOING BACK TO ASCALON", execute_fn=lambda: LDoA_TravelToOutpost(bot_vars.ascalon_map), exit_condition=lambda: Map.IsMapReady() and LDoA_IsOutpost() and Party.IsPartyLoaded(), transition_delay_ms=1000, run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="WAITING OUTPOST MAP", exit_condition=lambda: Map.IsMapReady() and LDoA_IsOutpost() and Party.IsPartyLoaded(), transition_delay_ms=1500, run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="GOING NEAR PRINCE RURIK", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.taking_quest_pathing, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.taking_quest_pathing, FSM_vars.movement_handler), run_once=False)
-FSM_vars.state_machine_elementalist.AddState(name="CHECK NPC", execute_fn=lambda: handle_npc_interaction(), transition_delay_ms=2000, run_once=True)
-FSM_vars.state_machine_elementalist.AddState(name="TAKING QUEST", execute_fn=lambda: Player.SendDialog(int("0x802E01", 16)), transition_delay_ms=1500, run_once=True)
-#END COMMON ROUTINE PART TWO
+# Level 1 Warrior is implemented by WarriorLevelingSteps().
+# Level 1 Ranger is implemented by RangerLevelingSteps().
+# Level 1 Monk is implemented by MonkLevelingSteps().
+# Level 1 Necromancer is implemented by NecromancerLevelingSteps().
+# Level 1 Mesmer is implemented by MesmerLevelingSteps().
 
 #___________________________ CHARR AT THE GATE ___________________________#
 FSM_vars.state_machine_lvl2_10.AddState(name="GOING OUT ASCALON", execute_fn=lambda: Routines.Movement.FollowPath(FSM_vars.ascalon_pathing_1, FSM_vars.movement_handler), exit_condition=lambda: Routines.Movement.IsFollowPathFinished(FSM_vars.ascalon_pathing_1, FSM_vars.movement_handler) or (Map.IsMapReady() and Map.IsExplorable() and Party.IsPartyLoaded()), run_once=False)
@@ -3401,51 +4313,41 @@ def main():
                 else:
                     FSM_vars.state_machine_lvl2_10.update()
 
-            #LEVEL 1 - WARRIOR (BottingTree pilot, in place of state_machine_warrior)
+            #LEVEL 1 - WARRIOR
             elif state.radio_button_selected == 20:
                 if TickWarriorBottingTree():
                     ResetEnvironment()
                     StopBot()
 
             #LEVEL 1 - RANGER
-            elif state.radio_button_selected == 21:  
-                if FSM_vars.state_machine_ranger.is_finished():
+            elif state.radio_button_selected == 21:
+                if TickRangerBottingTree():
                     ResetEnvironment()
                     StopBot()
-                else:
-                    FSM_vars.state_machine_ranger.update()   
                     
             #LEVEL 1 - MONK
-            elif state.radio_button_selected == 22:  
-                if FSM_vars.state_machine_monk.is_finished():
+            elif state.radio_button_selected == 22:
+                if TickMonkBottingTree():
                     ResetEnvironment()
                     StopBot()
-                else:
-                    FSM_vars.state_machine_monk.update()   
 
             #LEVEL 1 - NECROMANCER
-            elif state.radio_button_selected == 23:  
-                if FSM_vars.state_machine_necromancer.is_finished():
+            elif state.radio_button_selected == 23:
+                if TickNecromancerBottingTree():
                     ResetEnvironment()
                     StopBot()
-                else:
-                    FSM_vars.state_machine_necromancer.update()   
 
             #LEVEL 1 - MESMER
-            elif state.radio_button_selected == 24:  
-                if FSM_vars.state_machine_mesmer.is_finished():
+            elif state.radio_button_selected == 24:
+                if TickMesmerBottingTree():
                     ResetEnvironment()
                     StopBot()
-                else:
-                    FSM_vars.state_machine_mesmer.update() 
 
-            #LEVEL 1 - MESMER
-            elif state.radio_button_selected == 25:  
-                if FSM_vars.state_machine_elementalist.is_finished():
+            #LEVEL 1 - ELEMENTALIST
+            elif state.radio_button_selected == 25:
+                if TickElementalistBottingTree():
                     ResetEnvironment()
                     StopBot()
-                else:
-                    FSM_vars.state_machine_elementalist.update() 
 
             # LEVEL 11-20       
             elif state.radio_button_selected == 1:  
